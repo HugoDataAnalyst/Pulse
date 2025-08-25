@@ -13,6 +13,9 @@ MANIFEST
 .venv/
 .env
 
+# Docker
+docker-compose.yml
+
 # Node NPM
 node_modules/
 
