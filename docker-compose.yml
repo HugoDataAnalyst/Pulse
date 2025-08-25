@@ -1,0 +1,14 @@
+services:
+  pulse_app:
+    container_name: pulse_app
+    build: .
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+
+networks:
+  pulse_network:
+    external:
+      name: pulse_default
