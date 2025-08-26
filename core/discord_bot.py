@@ -2,24 +2,25 @@ import discord
 from discord import app_commands
 from loguru import logger
 import config as AppConfig
+
 from core.ui.hubs import (
-    post_core_hub, post_stats_hub, post_subs_hub, register_persistent_views
+    post_hub, core_specs, stats_specs, subs_specs, HubView
 )
 
-# ── Cast helpers
-def to_int(val: str | None) -> int | None:
-    try:
-        return int(val) if val else None
-    except ValueError:
-        return None
+# Section-specific follow-up handlers
+from core.ui.handlers_core import on_core_click, on_accounts_click, on_proxies_click
+from stats.ui.handlers_stats import on_pokemon_click, on_quests_click, on_raids_click, on_invasions_click
+from subs.ui.handlers_subs import on_subtime_click
 
-# Move this to a pydantic check maybe?
-GUILD_ID              = to_int(AppConfig.GUILD_ID)
-NOTIFY_CHANNEL_ID     = to_int(AppConfig.NOTIFY_CHANNEL_ID)
-CORE_HUB_CHANNEL_ID   = to_int(AppConfig.CORE_HUB_CHANNEL_ID)
-STATS_HUB_CHANNEL_ID  = to_int(AppConfig.STATS_HUB_CHANNEL_ID)
-SUBS_HUB_CHANNEL_ID   = to_int(AppConfig.SUBS_HUB_CHANNEL_ID)
-ADMIN_USER_IDS        = {int(x) for x in AppConfig.ADMIN_USER_IDS if x.isdigit()}
+def to_int(v):
+    try: return int(v) if v else None
+    except: return None
+
+GUILD_ID            = to_int(AppConfig.GUILD_ID)
+CORE_HUB_CHANNEL_ID = to_int(AppConfig.CORE_HUB_CHANNEL_ID)
+STATS_HUB_CHANNEL_ID= to_int(AppConfig.STATS_HUB_CHANNEL_ID)
+SUBS_HUB_CHANNEL_ID = to_int(AppConfig.SUBS_HUB_CHANNEL_ID)
+ADMIN_USER_IDS      = {int(x) for x in AppConfig.ADMIN_USER_IDS if x.isdigit()}
 
 intents = discord.Intents.default()
 intents.message_content = False
@@ -30,99 +31,60 @@ class PulseClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # Register persistent views so buttons keep working across restarts
-        register_persistent_views(self, ADMIN_USER_IDS)
-
-        # Register example slash commands (single layer)
-        await register_core_commands(self.tree)
-        await register_stats_commands(self.tree)
-        await register_subs_commands(self.tree)
-
-        # Sync to guild for instant availability
+        # Slash commands omitted here for brevity...
         if GUILD_ID:
             await self.tree.sync(guild=discord.Object(id=GUILD_ID))
-            logger.info(f"Slash commands synced to guild {GUILD_ID}")
-        else:
-            await self.tree.sync()
-            logger.warning("GUILD_ID missing; commands synced globally (may take time).")
+
+        # Register persistent views by constructing them once
+        self.add_view(HubView("Pulse • Core",  core_specs(
+            on_core=on_core_click,
+            on_accounts=on_accounts_click,
+            on_proxies=on_proxies_click,
+            admin_only=True,
+        ), ADMIN_USER_IDS))
+
+        self.add_view(HubView("Pulse • Stats", stats_specs(
+            on_pokemon=on_pokemon_click,
+            on_quests=on_quests_click,
+            on_raids=on_raids_click,
+            on_invasions=on_invasions_click,
+        ), ADMIN_USER_IDS))
+
+        self.add_view(HubView("Pulse • Subs", subs_specs(
+            on_subtime=on_subtime_click,
+        ), ADMIN_USER_IDS))
 
     async def on_ready(self):
-        logger.info(f"Logged in as {self.user} (id={self.user.id})")
-        # Post the hubs using the new UI helpers
+        logger.info(f"Logged in as {self.user}")
         await self._post_hubs()
 
     async def _post_hubs(self):
-        # Core hub
         if CORE_HUB_CHANNEL_ID:
             ch = self.get_channel(CORE_HUB_CHANNEL_ID)
             if ch:
-                await post_core_hub(ch, ADMIN_USER_IDS)
-            else:
-                logger.warning(f"Core hub channel {CORE_HUB_CHANNEL_ID} not found.")
-        # Stats hub
+                await post_hub(ch, "Pulse • Core", core_specs(
+                    on_core=on_core_click,
+                    on_accounts=on_accounts_click,
+                    on_proxies=on_proxies_click,
+                    admin_only=True,
+                ), ADMIN_USER_IDS)
+
         if STATS_HUB_CHANNEL_ID:
             ch = self.get_channel(STATS_HUB_CHANNEL_ID)
             if ch:
-                await post_stats_hub(ch)
-            else:
-                logger.warning(f"Stats hub channel {STATS_HUB_CHANNEL_ID} not found.")
-        # Subs hub
+                await post_hub(ch, "Pulse • Stats", stats_specs(
+                    on_pokemon=on_pokemon_click,
+                    on_quests=on_quests_click,
+                    on_raids=on_raids_click,
+                    on_invasions=on_invasions_click,
+                ), ADMIN_USER_IDS)
+
         if SUBS_HUB_CHANNEL_ID:
             ch = self.get_channel(SUBS_HUB_CHANNEL_ID)
             if ch:
-                await post_subs_hub(ch)
-            else:
-                logger.warning(f"Subs hub channel {SUBS_HUB_CHANNEL_ID} not found.")
-
-# ── Minimal example slash commands DEMOS ONLY
-async def register_core_commands(tree: app_commands.CommandTree):
-    guild_obj = discord.Object(id=GUILD_ID) if GUILD_ID else None
-
-    @tree.command(name="ping_rotom", description="Rotom online check", guild=guild_obj)
-    async def ping_rotom(inter: discord.Interaction):
-        if ADMIN_USER_IDS and inter.user.id not in ADMIN_USER_IDS:
-            return await inter.response.send_message("Not allowed.", ephemeral=True)
-        await inter.response.send_message("Rotom: ✅ online", ephemeral=True)
-
-    @tree.command(name="ping_dragonite", description="Dragonite online check", guild=guild_obj)
-    async def ping_drago(inter: discord.Interaction):
-        if ADMIN_USER_IDS and inter.user.id not in ADMIN_USER_IDS:
-            return await inter.response.send_message("Not allowed.", ephemeral=True)
-        await inter.response.send_message("Dragonite: ✅ online", ephemeral=True)
-
-    @tree.command(name="worker_list", description="List example workers (demo)", guild=guild_obj)
-    async def worker_list(inter: discord.Interaction):
-        if ADMIN_USER_IDS and inter.user.id not in ADMIN_USER_IDS:
-            return await inter.response.send_message("Not allowed.", ephemeral=True)
-        demo = [
-            "- **Scanner-A** • area `Setubal` • 🟢 running",
-            "- **Scanner-B** • area `Aveiro`  • 🔴 stopped",
-        ]
-        await inter.response.send_message("\n".join(demo), ephemeral=True)
-
-async def register_stats_commands(tree: app_commands.CommandTree):
-    guild_obj = discord.Object(id=GUILD_ID) if GUILD_ID else None
-
-    @tree.command(name="stats_summary", description="Show simple stats (demo)", guild=guild_obj)
-    @app_commands.describe(iv_min="Min IV (0-100)", iv_max="Max IV (0-100)")
-    async def stats_summary(
-        inter: discord.Interaction,
-        iv_min: app_commands.Range[int, 0, 100],
-        iv_max: app_commands.Range[int, 0, 100],
-    ):
-        total = 12345
-        in_range = 678
-        await inter.response.send_message(
-            f"**Total (24h):** {total}\n**In range {iv_min}-{iv_max}:** {in_range}",
-            ephemeral=True
-        )
-
-async def register_subs_commands(tree: app_commands.CommandTree):
-    guild_obj = discord.Object(id=GUILD_ID) if GUILD_ID else None
-
-    @tree.command(name="sub_remaining", description="See your remaining subscription (demo)", guild=guild_obj)
-    async def sub_remaining(inter: discord.Interaction):
-        await inter.response.send_message("You have **12** day(s) left.", ephemeral=True)
+                await post_hub(ch, "Pulse • Subs", subs_specs(
+                    on_subtime=on_subtime_click,
+                ), ADMIN_USER_IDS)
 
 client = PulseClient()
 

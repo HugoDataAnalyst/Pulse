@@ -37,21 +37,19 @@ def get_env_int(name: str, default = None) -> Optional[int]:
 
 # Discord Bot
 DISCORD_TOKEN = get_env_var("DISCORD_TOKEN")
-GUILD_ID = get_env_var("GUILD_ID")
-NOTIFY_CHANNEL_ID = get_env_var("NOTIFY_CHANNEL_ID")
-CORE_HUB_CHANNEL_ID = get_env_var("CORE_HUB_CHANNEL_ID")
-STATS_HUB_CHANNEL_ID = get_env_var("STATS_HUB_CHANNEL_ID")
-SUBS_HUB_CHANNEL_ID = get_env_var("SUBS_HUB_CHANNEL_ID")
+GUILD_ID = get_env_int("GUILD_ID")
+NOTIFY_CHANNEL_ID = get_env_int("NOTIFY_CHANNEL_ID")
+CORE_HUB_CHANNEL_ID = get_env_int("CORE_HUB_CHANNEL_ID")
+STATS_HUB_CHANNEL_ID = get_env_int("STATS_HUB_CHANNEL_ID")
+SUBS_HUB_CHANNEL_ID = get_env_int("SUBS_HUB_CHANNEL_ID")
 ADMIN_USER_IDS = get_env_list("ADMIN_USER_IDS")
 
 # Rotom
 ROTOM_API_BASE_URL = get_env_var("ROTOM_API_BASE_URL")
-ROTOM_API_KEY = get_env_var("ROTOM_API_KEY")
 
 # Dragonite
 DRAGONITE_API_BASE_URL = get_env_var("DRAGONITE_API_BASE_URL")
-DRAGONITE_API_USERNAME = get_env_var("DRAGONITE_API_USERNAME")
-DRAGONITE_API_KEY = get_env_var("DRAGONITE_API_KEY")
+
 # Dragonite DB
 DRAGONITE_DB_HOST = get_env_var("DRAGONITE_DB_HOST")
 DRAGONITE_DB_PORT = get_env_var("DRAGONITE_DB_PORT")
