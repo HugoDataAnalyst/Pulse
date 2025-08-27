@@ -138,7 +138,7 @@ def core_specs(
     admin_only: bool = True,
 ) -> list[ButtonSpec]:
     return [
-        ButtonSpec("pulse:core:accounts", "Accounts", discord.ButtonStyle.secondary, on_accounts, admin_only),
+        ButtonSpec("pulse:core:accounts", "Accounts", discord.ButtonStyle.primary, on_accounts, admin_only),
         ButtonSpec("pulse:core:proxies",  "Proxies",  discord.ButtonStyle.success,   on_proxies,  admin_only),
         ButtonSpec("pulse:core:areas",    "Areas",    discord.ButtonStyle.primary,   on_areas,    admin_only),
         ButtonSpec("pulse:core:quests",   "Quests",   discord.ButtonStyle.primary,   on_quests,   admin_only),

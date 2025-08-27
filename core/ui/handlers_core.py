@@ -14,9 +14,18 @@ from core.dragonite.gets import (
     recalc_fort,
     recalc_pokemon,
     reload_proxies,
+    reload_global,
     start_area,
     stop_area,
     info_area,
+)
+from core .dragonite.sql.dao import (
+    banned_usernames,
+    reset_banned_accounts,
+    update_area_quest_hours,
+    reactivate_account_from_info,
+    delete_account,
+    IntervalUnit,
 )
 from core.dragonite.deletes import delete_proxy
 from core.dragonite.posts import add_proxy
@@ -105,6 +114,33 @@ def _flag(name: str, v: bool) -> str:
 
 def _maybe(v) -> str:
     return "—" if v in (None, "", 0, False) else str(v)
+
+# -------- Helpers for SQL Dragonite ----------
+_INTERVAL_ALIASES = {
+    "m": IntervalUnit.MINUTE, "min": IntervalUnit.MINUTE, "minute": IntervalUnit.MINUTE, "minutes": IntervalUnit.MINUTE,
+    "h": IntervalUnit.HOUR,   "hr": IntervalUnit.HOUR,    "hour": IntervalUnit.HOUR,     "hours": IntervalUnit.HOUR,
+    "d": IntervalUnit.DAY,    "day": IntervalUnit.DAY,    "days": IntervalUnit.DAY,
+    "mo": IntervalUnit.MONTH, "mon": IntervalUnit.MONTH,  "month": IntervalUnit.MONTH,   "months": IntervalUnit.MONTH,
+}
+
+def _parse_interval_unit(s: str) -> IntervalUnit:
+    key = (s or "").strip().lower()
+    if key in _INTERVAL_ALIASES:
+        return _INTERVAL_ALIASES[key]
+    # strict fallback to raise like DAO does
+    return IntervalUnit(key)  # will raise ValueError if not valid
+
+def _parse_usernames_block(s: str) -> list[str]:
+    # accepts comma, space or newline separated
+    raw = (s or "").replace(",", " ").split()
+    # unique, keep order
+    seen, out = set(), []
+    for u in raw:
+        u = u.strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 # -----------------------
@@ -251,7 +287,9 @@ def _embed_accounts_level_stats(rows: list[dict]) -> discord.Embed:
 
     return emb
 
-
+# -----------------------
+# ACCOUNTS
+# -----------------------
 class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
     account_name = discord.ui.TextInput(label="Account name", placeholder="e.g., test123", required=True, max_length=64)
 
@@ -268,7 +306,7 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
                 return await inter.followup.send(f"❌ Lookup failed: `{e}`", ephemeral=True)
             return await inter.response.send_message(f"❌ Lookup failed: `{e}`", ephemeral=True)
 
-        # Derive overall status
+        # Decide if we need action buttons
         issues = {
             "Banned":      bool(acc.get("banned")),
             "Disabled":    bool(acc.get("disabled")),
@@ -280,42 +318,22 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
         has_issues = any(issues.values())
         color = 0x3BA55D if not has_issues else 0xED4245
 
-        # Title & header
-        title_id = acc.get("id") or acc.get("username") or "Unknown"
+        # Prefer explicit username key if provided by API
+        username = (acc.get("username") or acc.get("id") or "").strip()
+
         emb = discord.Embed(
-            title=f"Account • {title_id}",
+            title=f"Account • {username or 'Unknown'}",
             color=color,
             description=f"{'🟢' if not has_issues else '🔴'} **Status** — "
                         f"{'Good' if not has_issues else 'Attention needed'}"
         )
-
-        # Basics
         emb.add_field(name="Username", value=_maybe(acc.get("username")), inline=True)
         emb.add_field(name="Provider", value=_maybe(acc.get("provider")), inline=True)
         emb.add_field(name="Level",    value=_maybe(acc.get("level")), inline=True)
 
-        # Usage & token
-        emb.add_field(
-            name="Usage",
-            value=f"In use: **{_yn(acc.get('in_use'))}**",
-            inline=True
-        )
-        emb.add_field(
-            name="Token",
-            value=(
-                f"Valid refresh: **{_yn(acc.get('valid_refresh_token'))}**\n"
-                f"Consec. disabled: **{_fmt_int(acc.get('consecutive_disabled') or 0)}**"
-            ),
-            inline=True
-        )
-        # Leave a spacer for nicer layout if needed
-        emb.add_field(name="\u200b", value="\u200b", inline=True)
-
-        # Flags (nice, compact)
-        flag_lines = [ _flag(n, v) for n, v in issues.items() ]
+        flag_lines = [_flag(n, v) for n, v in issues.items()]
         emb.add_field(name="Flags", value="\n".join(flag_lines), inline=False)
 
-        # Timeline with Discord relative timestamps
         emb.add_field(
             name="Timeline",
             value=(
@@ -328,20 +346,35 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
             inline=False
         )
 
-        # Actions (still demo)
-        view = discord.ui.View(timeout=60)
-        b1 = discord.ui.Button(label="Re-activate", style=discord.ButtonStyle.success, custom_id="pulse:acc:reactivate")
-        b2 = discord.ui.Button(label="Delete",      style=discord.ButtonStyle.danger,  custom_id="pulse:acc:delete")
+        view = None
+        if has_issues and username:
+            view = discord.ui.View(timeout=60)
 
-        async def _reactivate(_i: discord.Interaction):
-            await _i.response.send_message("🔧 (demo) Reactivate requested.", ephemeral=True)
+            async def _reactivate(_i: discord.Interaction):
+                await _i.response.defer(ephemeral=True, thinking=True)
+                try:
+                    changed = await reactivate_account_from_info(username, acc)
+                    msg = "✅ Account reactivated." if changed else "ℹ️ Nothing to reset."
+                    await _i.followup.send(msg, ephemeral=True)
+                except Exception as e:
+                    logger.exception("reactivate_account_from_info failed")
+                    await _i.followup.send(f"❌ Reactivate failed: `{e}`", ephemeral=True)
 
-        async def _delete(_i: discord.Interaction):
-            await _i.response.send_message("🗑️ (demo) Delete requested.", ephemeral=True)
+            async def _delete(_i: discord.Interaction):
+                await _i.response.defer(ephemeral=True, thinking=True)
+                try:
+                    changed = await delete_account(username)
+                    msg = "🗑️ Account deleted." if changed else "ℹ️ Account not found."
+                    await _i.followup.send(msg, ephemeral=True)
+                except Exception as e:
+                    logger.exception("delete_account failed")
+                    await _i.followup.send(f"❌ Delete failed: `{e}`", ephemeral=True)
 
-        b1.callback = _reactivate
-        b2.callback = _delete
-        view.add_item(b1); view.add_item(b2)
+            btn_re = discord.ui.Button(label="Re-activate", style=discord.ButtonStyle.success)
+            btn_dl = discord.ui.Button(label="Delete",      style=discord.ButtonStyle.danger)
+            btn_re.callback = _reactivate
+            btn_dl.callback = _delete
+            view.add_item(btn_re); view.add_item(btn_dl)
 
         if inter.response.is_done():
             await inter.followup.send(embed=emb, view=view, ephemeral=True)
@@ -349,12 +382,12 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
             await inter.response.send_message(embed=emb, view=view, ephemeral=True)
 
 
-
 class AccountsMenu(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
         self.add_item(discord.ui.Button(label="Resume", style=discord.ButtonStyle.primary,   custom_id="pulse:acc:resume"))
-        self.add_item(discord.ui.Button(label="Lookup", style=discord.ButtonStyle.secondary, custom_id="pulse:acc:lookup"))
+        self.add_item(discord.ui.Button(label="Lookup", style=discord.ButtonStyle.success, custom_id="pulse:acc:lookup"))
+        self.add_item(discord.ui.Button(label="Check Banned", style=discord.ButtonStyle.danger, custom_id="pulse:acc:banned"))
 
         for item in self.children:
             if isinstance(item, discord.ui.Button):
@@ -362,6 +395,8 @@ class AccountsMenu(discord.ui.View):
                     item.callback = self._resume
                 elif item.custom_id == "pulse:acc:lookup":
                     item.callback = self._lookup
+                elif item.custom_id == "pulse:acc:banned":
+                    item.callback = self._banned
 
     async def _resume(self, inter: discord.Interaction):
         try:
@@ -389,8 +424,181 @@ class AccountsMenu(discord.ui.View):
     async def _lookup(self, inter: discord.Interaction):
         await inter.response.send_modal(AccountLookupModal())
 
+    async def _banned(self, inter: discord.Interaction):
+        await inter.response.send_modal(BannedQueryModal())
+
+
 async def on_accounts_click(inter: discord.Interaction):
     await inter.response.send_message("**Accounts Menu**", view=AccountsMenu(), ephemeral=True)
+
+# -----------------------
+# Accounts SQL
+# -----------------------
+class BannedQueryModal(discord.ui.Modal, title="Banned accounts window"):
+    interval_value = discord.ui.TextInput(
+        label="Interval value",
+        placeholder="e.g., 24",
+        required=True,
+        max_length=4
+    )
+    interval_unit = discord.ui.TextInput(
+        label="Unit (minutes/hours/days/months)",
+        placeholder="e.g., hours (or h / hr / hour), minutes (or m / min / minute), days (or d / day), months (or mo / mon / month)",
+        required=True,
+        max_length=10
+    )
+    provider = discord.ui.TextInput(
+        label="Provider (nk or ptc)",
+        placeholder="nk",
+        required=True,
+        max_length=8,
+        default="nk"
+    )
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            # validate inputs
+            try:
+                ivalue = int(str(self.interval_value))
+                if ivalue <= 0:
+                    raise ValueError
+            except Exception:
+                return await inter.followup.send("❌ Interval value must be a positive integer.", ephemeral=True)
+
+            try:
+                unit = _parse_interval_unit(str(self.interval_unit))
+            except Exception:
+                return await inter.followup.send("❌ Interval unit must be one of: minutes, hours, days, months.", ephemeral=True)
+
+            prov = str(self.provider).strip().lower()
+            if prov not in ("nk", "ptc"):
+                return await inter.followup.send("❌ Provider must be `nk` or `ptc`.", ephemeral=True)
+
+            # fetch usernames
+            names = await banned_usernames(prov, ivalue, unit)
+            if not names:
+                return await inter.followup.send(f"✅ No banned accounts in the last **{ivalue} {unit.value}** for provider **{prov}**.", ephemeral=True)
+
+            # Build a compact embed with list (trim to size)
+            listing = "\n".join(f"• `{u}`" for u in names)
+            if len(listing) > 1900:
+                listing = listing[:1900] + "…"
+
+            emb = discord.Embed(
+                title="Banned Accounts",
+                description=f"Provider **{prov}** • Window **{ivalue} {unit.value}**\n\n{listing}",
+                color=0xED4245
+            )
+            emb.set_footer(text=f"Total: {len(names)}")
+
+            # Actions: Lookup / Unban (multi-user)
+            view = BannedActions(names)
+            await inter.followup.send(embed=emb, view=view, ephemeral=True)
+
+        except Exception as e:
+            logger.exception("BannedQueryModal failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
+
+class BannedActions(discord.ui.View):
+    def __init__(self, default_usernames: list[str]):
+        super().__init__(timeout=120)
+        self.default_usernames = default_usernames or []
+        self.add_item(discord.ui.Button(label="Lookup…", style=discord.ButtonStyle.primary, custom_id="pulse:acc:banned:lookup"))
+        self.add_item(discord.ui.Button(label="Unban…",  style=discord.ButtonStyle.success, custom_id="pulse:acc:banned:unban"))
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id.endswith(":lookup"):
+                    child.callback = self._lookup
+                elif child.custom_id.endswith(":unban"):
+                    child.callback = self._unban
+
+    async def _lookup(self, inter: discord.Interaction):
+        await inter.response.send_modal(LookupManyModal(self.default_usernames))
+
+    async def _unban(self, inter: discord.Interaction):
+        await inter.response.send_modal(UnbanManyModal(self.default_usernames))
+
+
+class LookupManyModal(discord.ui.Modal, title="Lookup accounts"):
+    usernames = discord.ui.TextInput(
+        label="Usernames (comma/space/newline)",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1800
+    )
+
+    def __init__(self, defaults: list[str]):
+        super().__init__(timeout=120)
+        if defaults:
+            # prefill (fits most lists; Discord modal text has length limit)
+            self.usernames.default = " ".join(defaults[:200])
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            from core.dragonite.gets import get_account_by_name
+            async with get_dragonite_client() as api:
+                names = _parse_usernames_block(str(self.usernames))
+                if not names:
+                    return await inter.followup.send("❌ No usernames provided.", ephemeral=True)
+
+                found = 0
+                previews = []
+                for uname in names[:50]:  # cap previews to keep under limits
+                    try:
+                        acc = await get_account_by_name(api, uname)
+                        if acc:
+                            found += 1
+                            ok = not bool(acc.get("banned") or acc.get("disabled") or acc.get("invalid") or acc.get("suspended"))
+                            status = "🟩 good" if ok else "🟥 attention"
+                            previews.append(f"• `{uname}` — lvl {acc.get('level','?')} — {status}")
+                    except Exception as e:
+                        previews.append(f"• `{uname}` — error: {e}")
+
+                desc = "\n".join(previews) or "—"
+                if len(desc) > 1900:
+                    desc = desc[:1900] + "…"
+
+                emb = discord.Embed(
+                    title="Lookup results",
+                    description=desc,
+                    color=0x2f3136
+                )
+                emb.set_footer(text=f"Requested: {len(names)} • Found: {found}")
+                await inter.followup.send(embed=emb, ephemeral=True)
+        except Exception as e:
+            logger.exception("LookupManyModal failed")
+            await inter.followup.send(f"❌ Lookup failed: `{e}`", ephemeral=True)
+
+
+class UnbanManyModal(discord.ui.Modal, title="Unban accounts"):
+    usernames = discord.ui.TextInput(
+        label="Usernames (comma/space/newline)",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1800
+    )
+
+    def __init__(self, defaults: list[str]):
+        super().__init__(timeout=120)
+        if defaults:
+            self.usernames.default = " ".join(defaults[:200])
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            names = _parse_usernames_block(str(self.usernames))
+            if not names:
+                return await inter.followup.send("❌ No usernames provided.", ephemeral=True)
+
+            # reset banned -> set banned=0, last_banned=NULL
+            changed = await reset_banned_accounts(names=names)
+            await inter.followup.send(f"🔧 Unbanned **{changed}** accounts.", ephemeral=True)
+        except Exception as e:
+            logger.exception("UnbanManyModal failed")
+            await inter.followup.send(f"❌ Unban failed: `{e}`", ephemeral=True)
 
 # -----------------------
 # PROXIES
@@ -571,6 +779,7 @@ class QuestAreaActions(discord.ui.View):
     def __init__(self, area: dict):
         super().__init__(timeout=120)
         self.area = area
+        self.add_item(discord.ui.Button(label="Quest Hours", style=discord.ButtonStyle.primary, custom_id="pulse:quests:area:hours"))
         self.add_item(discord.ui.Button(label="Start",  style=discord.ButtonStyle.success, custom_id="pulse:quests:area:start"))
         self.add_item(discord.ui.Button(label="Stop",   style=discord.ButtonStyle.danger,  custom_id="pulse:quests:area:stop"))
         self.add_item(discord.ui.Button(label="Status", style=discord.ButtonStyle.secondary, custom_id="pulse:quests:area:status"))
@@ -583,6 +792,8 @@ class QuestAreaActions(discord.ui.View):
                     child.callback = self._stop
                 elif child.custom_id.endswith(":status"):
                     child.callback = self._status
+                elif child.custom_id.endswith(":hours"):
+                    child.callback = self._hours
 
     async def _start(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
@@ -650,8 +861,43 @@ class QuestAreaActions(discord.ui.View):
             logger.exception("Quest area status failed")
             await inter.followup.send(f"❌ Status failed: `{e}`", ephemeral=True)
 
+    async def _hours(self, inter: discord.Interaction):
+        await inter.response.send_modal(QuestHoursModal(self.area))
+
+
 async def on_core_quests_click(inter: discord.Interaction):
     await inter.response.send_message("**Quests Menu**", view=QuestsMenu(), ephemeral=True)
+
+# -----------------------
+# Quest Hours SQL
+# -----------------------
+class QuestHoursModal(discord.ui.Modal, title="Set Quest Hours"):
+    hours = discord.ui.TextInput(
+        label="Hours (0-23, comma/space)",
+        placeholder="e.g., 1,11 or 9 12 18",
+        required=True,
+        max_length=200
+    )
+
+    def __init__(self, area: dict):
+        super().__init__(timeout=120)
+        self.area = area
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            # Let the DAO do strict validation (0–23 only) and formatting
+            changed = await update_area_quest_hours(int(self.area["id"]), str(self.hours))
+            if changed:
+                await inter.followup.send(f"🕘 Updated quest hours for **{self.area['name']}**.", ephemeral=True)
+            else:
+                await inter.followup.send(f"ℹ️ Quest hours unchanged for **{self.area['name']}**.", ephemeral=True)
+        except ValueError as ve:
+            # Raised by DAO when format invalid
+            await inter.followup.send(f"❌ {ve}", ephemeral=True)
+        except Exception as e:
+            logger.exception("QuestHoursModal failed")
+            await inter.followup.send(f"❌ Update failed: `{e}`", ephemeral=True)
 
 # -----------------------
 # ReCalc
