@@ -39,6 +39,7 @@ def get_env_int(name: str, default = None) -> Optional[int]:
 DISCORD_TOKEN = get_env_var("DISCORD_TOKEN")
 GUILD_ID = get_env_int("GUILD_ID")
 NOTIFY_CHANNEL_ID = get_env_int("NOTIFY_CHANNEL_ID")
+CORE_OVERVIEW_CHANNEL_ID = get_env_int("CORE_OVERVIEW_CHANNEL_ID")
 CORE_HUB_CHANNEL_ID = get_env_int("CORE_HUB_CHANNEL_ID")
 STATS_HUB_CHANNEL_ID = get_env_int("STATS_HUB_CHANNEL_ID")
 SUBS_HUB_CHANNEL_ID = get_env_int("SUBS_HUB_CHANNEL_ID")
@@ -49,6 +50,10 @@ ROTOM_API_BASE_URL = get_env_var("ROTOM_API_BASE_URL")
 
 # Dragonite
 DRAGONITE_API_BASE_URL = get_env_var("DRAGONITE_API_BASE_URL")
+DRAGONITE_API_USERNAME = get_env_var("DRAGONITE_API_USERNAME", None)
+DRAGONITE_API_PASSWORD = get_env_var("DRAGONITE_API_PASSWORD", None)
+DRAGONITE_API_KEY = get_env_var("DRAGONITE_API_KEY", None)
+DRAGONITE_BEARER_KEY = get_env_var("DRAGONITE_BEARER_KEY", None)
 
 # Dragonite DB
 DRAGONITE_DB_HOST = get_env_var("DRAGONITE_DB_HOST")
