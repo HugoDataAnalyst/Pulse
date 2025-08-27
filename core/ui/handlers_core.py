@@ -149,6 +149,15 @@ def _parse_usernames_block(s: str) -> list[str]:
             out.append(u)
     return out
 
+def _parse_hours_list(s: str) -> list[int]:
+    """Parse '0 11' or '0,11' (or mixed) into [0, 11]."""
+    tokens = (s or "").replace(",", " ").split()
+    hours: list[int] = []
+    for t in tokens:
+        if not t.strip():
+            continue
+        hours.append(int(t))  # let DAO range-check; this only enforces int-cast
+    return hours
 
 # -----------------------
 # ACCOUNTS
@@ -463,17 +472,20 @@ class BannedQueryModal(discord.ui.Modal, title="Banned accounts window"):
     )
     interval_unit = discord.ui.TextInput(
         label="Unit (minutes/hours/days/months)",
-        placeholder="e.g., hours (or h / hr / hour), minutes (or m / min / minute), days (or d / day), months (or mo / mon / month)",
+        placeholder="e.g., hours (h/hr), minutes (m/min), days (d), months (mo/mon)",
         required=True,
-        max_length=10
+        max_length=50
     )
     provider = discord.ui.TextInput(
         label="Provider (nk or ptc)",
         placeholder="nk",
         required=True,
-        max_length=8,
-        default="nk"
+        max_length=8
     )
+
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.provider.default = "nk"
 
     async def on_submit(self, inter: discord.Interaction):
         actor = _actor(inter)
@@ -965,22 +977,29 @@ class QuestHoursModal(discord.ui.Modal, title="Set Quest Hours"):
         logger.info(f"[audit] Quests.Hours submit by {actor} (area={self.area['name']}, hours={str(self.hours)!r})")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
-            # Let the DAO do strict validation (0–23 only) and formatting
-            changed = await update_area_quest_hours(int(self.area["id"]), str(self.hours))
+            hours_list = _parse_hours_list(str(self.hours))
+            hours_text = ", ".join(str(h) for h in hours_list) if hours_list else "—"
+            changed = await update_area_quest_hours(int(self.area["id"]), hours_list)
             if changed:
-                await inter.followup.send(f"🕘 Updated quest hours for **{self.area['name']}**.", ephemeral=True)
-                logger.info(f"[audit] Quests.Hours success for {actor} (area={self.area['name']}, changed=1)")
+                await inter.followup.send(
+                    f"🕘 Updated quest hours for **{self.area['name']}** → `{hours_text}`.",
+                    ephemeral=True
+                )
+                logger.info(f"[audit] Quests.Hours success for {actor} (area={self.area['name']}, changed=1, hours=[{hours_text}])")
             else:
-                await inter.followup.send(f"ℹ️ Quest hours unchanged for **{self.area['name']}**.", ephemeral=True)
-                logger.info(f"[audit] Quests.Hours success (no-change) for {actor} (area={self.area['name']})")
+                await inter.followup.send(
+                    f"ℹ️ Quest hours unchanged for **{self.area['name']}** (requested: `{hours_text}`).",
+                    ephemeral=True
+                )
+                logger.info(f"[audit] Quests.Hours success (no-change) for {actor} (area={self.area['name']}, hours=[{hours_text}])")
         except ValueError as ve:
             logger.info(f"[audit] Quests.Hours validation error for {actor} (area={self.area['name']}): {ve!r}")
-            # Raised by DAO when format invalid
             await inter.followup.send(f"❌ {ve}", ephemeral=True)
         except Exception as e:
             logger.info(f"[audit] Quests.Hours error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("QuestHoursModal failed")
             await inter.followup.send(f"❌ Update failed: `{e}`", ephemeral=True)
+
 
 # -----------------------
 # ReCalc
