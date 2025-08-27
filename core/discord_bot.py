@@ -11,7 +11,6 @@ from core.ui.handlers_core import (
     on_core_recalc_click
 )
 from core.ui.hubs_core_overview import CoreOverviewUpdater  # <— auto-refresh overview
-
 from stats.ui.handlers_stats import (
     on_pokemon_click,
     on_quests_click,
@@ -19,6 +18,8 @@ from stats.ui.handlers_stats import (
     on_invasions_click
 )
 from subs.ui.handlers_subs import on_subtime_click
+from utils.db import close_all_pools, close_pool
+from core.dragonite.sql.init import ensure_dragonite_pool, DB_KEY
 
 def to_int(v):
     try: return int(v) if v else None
@@ -41,6 +42,7 @@ class PulseClient(discord.Client):
         self._core_overview_updater: CoreOverviewUpdater | None = None
 
     async def setup_hook(self):
+        await ensure_dragonite_pool()
         if GUILD_ID:
             await self.tree.sync(guild=discord.Object(id=GUILD_ID))
 
@@ -85,6 +87,10 @@ class PulseClient(discord.Client):
     async def close(self):
         if self._core_overview_updater:
             self._core_overview_updater.stop()
+        try:
+            await close_pool(DB_KEY)
+        except Exception as e:
+            logger.error(f" Failed to close DB pool '{DB_KEY}': {e}")
         await super().close()
 
     async def _post_hubs(self):
