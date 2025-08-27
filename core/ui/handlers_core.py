@@ -33,6 +33,13 @@ from core.dragonite.processors import proxies_bad_list, status_area_map, summari
 from core.ui.pagination import PaginatedAreaPicker
 from utils.static_map import render_geofence_png
 
+# ---------- Discord User Tracker ----------
+def _actor(inter: discord.Interaction) -> str:
+    """Return 'DisplayName#1234 (123456789012345678)' for logs."""
+    u = inter.user
+    # If you prefer username only, use: f"{u} ({u.id})"
+    return f"{getattr(u, 'display_name', str(u))} ({u.id})"
+
 # ---------- Pretty helpers ----------
 def _fmt_int(n) -> str:
     try:
@@ -297,6 +304,8 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
         super().__init__(timeout=120)
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.Lookup submit by {actor} (query={str(self.account_name)!r})")
         try:
             async with get_dragonite_client() as api:
                 acc = await get_account_by_name(api, str(self.account_name))
@@ -376,10 +385,14 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
             btn_dl.callback = _delete
             view.add_item(btn_re); view.add_item(btn_dl)
 
-        if inter.response.is_done():
-            await inter.followup.send(embed=emb, view=view, ephemeral=True)
-        else:
-            await inter.response.send_message(embed=emb, view=view, ephemeral=True)
+        try:
+            if inter.response.is_done():
+                await inter.followup.send(embed=emb, view=view, ephemeral=True)
+                logger.info(f"[audit] Accounts.Lookup success for {actor} (username={username!r})")
+            else:
+                await inter.response.send_message(embed=emb, view=view, ephemeral=True)
+        except Exception as e:
+            logger.info(f"[audit] Accounts.Lookup error for {actor} (username={username!r}): {e!r}")
 
 
 class AccountsMenu(discord.ui.View):
@@ -399,33 +412,40 @@ class AccountsMenu(discord.ui.View):
                     item.callback = self._banned
 
     async def _resume(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.Resume click by {actor}")
         try:
             async with get_dragonite_client() as api:
                 rows = await get_accounts_level_stats(api)
             emb = _embed_accounts_level_stats(rows)
+
             if inter.response.is_done():
                 await inter.followup.send(embed=emb, ephemeral=True)
             else:
                 await inter.response.send_message(embed=emb, ephemeral=True)
+
+            logger.info(f"[audit] Accounts.Resume success by {actor}")
+
         except Exception as e:
+            logger.info(f"[audit] Accounts.Resume error by {actor}: {e!r}")
             logger.exception("Accounts resume failed")
             if inter.response.is_done():
                 await inter.followup.send(f"❌ Failed: `{e}`", ephemeral=True)
             else:
                 await inter.response.send_message(f"❌ Failed: `{e}`", ephemeral=True)
 
-        except Exception as e:
-            logger.exception("Accounts resume failed")
-            if inter.response.is_done():
-                await inter.followup.send(f"❌ Failed: `{e}`", ephemeral=True)
-            else:
-                await inter.response.send_message(f"❌ Failed: `{e}`", ephemeral=True)
 
     async def _lookup(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.Lookup click by {actor}")
         await inter.response.send_modal(AccountLookupModal())
+        logger.info(f"[audit] Accounts.Lookup modal opened for {actor}")
 
     async def _banned(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.Banned click by {actor}")
         await inter.response.send_modal(BannedQueryModal())
+        logger.info(f"[audit] Accounts.Banned modal opened for {actor}")
 
 
 async def on_accounts_click(inter: discord.Interaction):
@@ -456,6 +476,8 @@ class BannedQueryModal(discord.ui.Modal, title="Banned accounts window"):
     )
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.Banned submit by {actor} (provider={self.provider!r}, value={self.interval_value!r}, unit={self.interval_unit!r})")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             # validate inputs
@@ -478,6 +500,7 @@ class BannedQueryModal(discord.ui.Modal, title="Banned accounts window"):
             # fetch usernames
             names = await banned_usernames(prov, ivalue, unit)
             if not names:
+                logger.info(f"[audit] Accounts.Banned no-results for {actor} (provider={prov}, window={ivalue} {unit.value})")
                 return await inter.followup.send(f"✅ No banned accounts in the last **{ivalue} {unit.value}** for provider **{prov}**.", ephemeral=True)
 
             # Build a compact embed with list (trim to size)
@@ -495,8 +518,9 @@ class BannedQueryModal(discord.ui.Modal, title="Banned accounts window"):
             # Actions: Lookup / Unban (multi-user)
             view = BannedActions(names)
             await inter.followup.send(embed=emb, view=view, ephemeral=True)
-
+            logger.info(f"[audit] Accounts.Banned success for {actor} (count={len(names)}, provider={prov}, window={ivalue} {unit.value})")
         except Exception as e:
+            logger.info(f"[audit] Accounts.Banned error for {actor}: {e!r}")
             logger.exception("BannedQueryModal failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
@@ -515,10 +539,14 @@ class BannedActions(discord.ui.View):
                     child.callback = self._unban
 
     async def _lookup(self, inter: discord.Interaction):
+        logger.info(f"[audit] Accounts.Banned.Lookup click by {_actor(inter)}")
         await inter.response.send_modal(LookupManyModal(self.default_usernames))
+        logger.info(f"[audit] Accounts.Banned.Lookup modal opened for {_actor(inter)}")
 
     async def _unban(self, inter: discord.Interaction):
+        logger.info(f"[audit] Accounts.Banned.Unban click by {_actor(inter)}")
         await inter.response.send_modal(UnbanManyModal(self.default_usernames))
+        logger.info(f"[audit] Accounts.Banned.Unban modal opened for {_actor(inter)}")
 
 
 class LookupManyModal(discord.ui.Modal, title="Lookup accounts"):
@@ -536,6 +564,8 @@ class LookupManyModal(discord.ui.Modal, title="Lookup accounts"):
             self.usernames.default = " ".join(defaults[:200])
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.LookupMany submit by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             from core.dragonite.gets import get_account_by_name
@@ -568,7 +598,9 @@ class LookupManyModal(discord.ui.Modal, title="Lookup accounts"):
                 )
                 emb.set_footer(text=f"Requested: {len(names)} • Found: {found}")
                 await inter.followup.send(embed=emb, ephemeral=True)
+                logger.info(f"[audit] Accounts.LookupMany success for {actor} (requested={len(names)}, found={found})")
         except Exception as e:
+            logger.info(f"[audit] Accounts.LookupMany error for {actor}: {e!r}")
             logger.exception("LookupManyModal failed")
             await inter.followup.send(f"❌ Lookup failed: `{e}`", ephemeral=True)
 
@@ -587,6 +619,8 @@ class UnbanManyModal(discord.ui.Modal, title="Unban accounts"):
             self.usernames.default = " ".join(defaults[:200])
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Accounts.UnbanMany submit by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             names = _parse_usernames_block(str(self.usernames))
@@ -596,7 +630,9 @@ class UnbanManyModal(discord.ui.Modal, title="Unban accounts"):
             # reset banned -> set banned=0, last_banned=NULL
             changed = await reset_banned_accounts(names=names)
             await inter.followup.send(f"🔧 Unbanned **{changed}** accounts.", ephemeral=True)
+            logger.info(f"[audit] Accounts.UnbanMany success for {actor} (changed={changed}, requested={len(names)})")
         except Exception as e:
+            logger.info(f"[audit] Accounts.UnbanMany error for {actor}: {e!r}")
             logger.exception("UnbanManyModal failed")
             await inter.followup.send(f"❌ Unban failed: `{e}`", ephemeral=True)
 
@@ -610,6 +646,8 @@ class ProxyAddModal(discord.ui.Modal, title="Add Proxy"):
     url      = discord.ui.TextInput(label="URL",   placeholder="http://proxy.test:10000", required=True, max_length=256)
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Proxies.Add submit by {actor} (id={str(self.proxy_id)!r}, name={str(self.name)!r})")
         try:
             pid = int(str(self.proxy_id))
             nm  = str(self.name).strip()
@@ -617,7 +655,9 @@ class ProxyAddModal(discord.ui.Modal, title="Add Proxy"):
             async with get_dragonite_client() as api:
                 res = await add_proxy(api, proxy_id=pid, name=nm, url=u)
             await inter.response.send_message(f"✅ Added proxy **{nm}** (`{pid}`)", ephemeral=True)
+            logger.info(f"[audit] Proxies.Add success by {actor} (id={pid}, name={nm})")
         except Exception as e:
+            logger.info(f"[audit] Proxies.Add error by {actor}: {e!r}")
             logger.exception("Add proxy failed")
             await inter.response.send_message(f"❌ Add failed: `{e}`", ephemeral=True)
 
@@ -625,13 +665,17 @@ class ProxyDeleteModal(discord.ui.Modal, title="Delete Proxy"):
     proxy_id = discord.ui.TextInput(label="ID", placeholder="e.g., 369", required=True, max_length=10)
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Proxies.Delete submit by {actor} (id={str(self.proxy_id)!r})")
         try:
             pid = int(str(self.proxy_id))
             async with get_dragonite_client() as api:
                 res = await delete_proxy(api, proxy_id=pid)
                 await reload_proxies(api)
             await inter.response.send_message(f"🗑️ Deleted proxy `{pid}` (if existed).", ephemeral=True)
+            logger.info(f"[audit] Proxies.Delete success by {actor} (id={pid})")
         except Exception as e:
+            logger.info(f"[audit] Proxies.Delete error by {actor}: {e!r}")
             logger.exception("Delete proxy failed")
             await inter.response.send_message(f"❌ Delete failed: `{e}`", ephemeral=True)
 
@@ -652,18 +696,23 @@ class ProxiesMenu(discord.ui.View):
                     item.callback = self._delete
 
     async def _add(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Proxies.Add click by {actor}")
         await inter.response.send_modal(ProxyAddModal())
+        logger.info(f"[audit] Proxies.Add modal opened for {actor}")
 
     async def _delete(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Proxies.Delete click by {actor}")
         await inter.response.send_modal(ProxyDeleteModal())
+        logger.info(f"[audit] Proxies.Delete modal opened for {actor}")
 
     async def _unban_all(self, inter: discord.Interaction):
-        # 1) Defer first -> shows the loading indicator
+        logger.info(f"[audit] Proxies.UnbanAll click by {_actor(inter)}")
         await inter.response.defer(ephemeral=True, thinking=True)
 
         try:
             async with get_dragonite_client() as api:
-                # 2) Let the user know we started (follow-up)
                 start_msg = await inter.followup.send(
                     "⚠️ This may take a while… starting unban process.",
                     ephemeral=True
@@ -675,7 +724,6 @@ class ProxiesMenu(discord.ui.View):
                 succeeded = 0
                 failed = 0
 
-                # Optional: track progress every N items
                 PROGRESS_EVERY = max(1, len(bad_list) // 10)  # ~10 updates max
 
                 for idx, item in enumerate(bad_list, start=1):
@@ -705,13 +753,14 @@ class ProxiesMenu(discord.ui.View):
                 except Exception as e:
                     logger.info(f"reload_proxies skipped/failed: {e}")
 
-            # 3) Final result
             await inter.followup.send(
                 f"🔁 Unban completed: **{succeeded}** ok, **{failed}** failed.",
                 ephemeral=True
             )
 
+            logger.info(f"[audit] Proxies.UnbanAll completed by {_actor(inter)}")
         except Exception as e:
+            logger.info(f"[audit] Proxies.UnbanAll error by {_actor(inter)}: {e!r}")
             logger.exception("Unban all failed")
             await inter.followup.send(f"❌ Unban failed: `{e}`", ephemeral=True)
 
@@ -739,41 +788,55 @@ class QuestsMenu(discord.ui.View):
                     child.callback = self._area
 
     async def _start_all(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.StartAll click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 res = await quest_start_all(api)
             await inter.followup.send("🟢 Quests **STARTED** for **ALL** areas.", ephemeral=True)
+            logger.info(f"[audit] Quests.StartAll success for {actor}")
         except Exception as e:
+            logger.info(f"[audit] Quests.StartAll error for {actor}: {e!r}")
             logger.exception("Quest start all failed")
             await inter.followup.send(f"❌ Start all failed: `{e}`", ephemeral=True)
 
     async def _stop_all(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.StopAll click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 res = await quest_stop_all(api)
             await inter.followup.send("🛑 Quests **STOPPED** for **ALL** areas.", ephemeral=True)
+            logger.info(f"[audit] Quests.StopAll success for {actor}")
         except Exception as e:
+            logger.info(f"[audit] Quests.StopAll error for {actor}: {e!r}")
             logger.exception("Quest stop all failed")
             await inter.followup.send(f"❌ Stop all failed: `{e}`", ephemeral=True)
 
     async def _area(self, inter: discord.Interaction):
-        # open area picker
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.Area click by {actor}")
         try:
-            async with get_dragonite_client() as api:
-                areas = await status_area_map(api)
+            try:
+                async with get_dragonite_client() as api:
+                    areas = await status_area_map(api)
+            except Exception as e:
+                logger.exception("Fetch areas failed (quests)")
+                return await inter.response.send_message(f"❌ Failed to load areas: `{e}`", ephemeral=True)
+
+            async def on_pick(i: discord.Interaction, area: dict):
+                # after picking an area, show start/stop/status for that area
+                view = QuestAreaActions(area)
+                await i.response.edit_message(content=f"**Quests • {area.get('name')}** — choose:", view=view)
+
+            view = PaginatedAreaPicker(areas, on_pick=on_pick, page=0, page_size=25)
+            await inter.response.edit_message(content="**Choose Area** (1/{})".format(max(1, (len(areas)+24)//25)), view=view)
+            logger.info(f"[audit] Quests.Area picker opened for {actor} (areas={len(areas)})")
         except Exception as e:
+            logger.info(f"[audit] Quests.Area error for {actor}: {e!r}")
             logger.exception("Fetch areas failed (quests)")
-            return await inter.response.send_message(f"❌ Failed to load areas: `{e}`", ephemeral=True)
-
-        async def on_pick(i: discord.Interaction, area: dict):
-            # after picking an area, show start/stop/status for that area
-            view = QuestAreaActions(area)
-            await i.response.edit_message(content=f"**Quests • {area.get('name')}** — choose:", view=view)
-
-        view = PaginatedAreaPicker(areas, on_pick=on_pick, page=0, page_size=25)
-        await inter.response.edit_message(content="**Choose Area** (1/{})".format(max(1, (len(areas)+24)//25)), view=view)
 
 class QuestAreaActions(discord.ui.View):
     def __init__(self, area: dict):
@@ -796,26 +859,36 @@ class QuestAreaActions(discord.ui.View):
                     child.callback = self._hours
 
     async def _start(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.Start for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await quest_start_area(api, int(self.area["id"]))
             await inter.followup.send(f"🟢 Quests **STARTED** for **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Quests.Start success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Quests.Start error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Quest start area failed")
             await inter.followup.send(f"❌ Start failed: `{e}`", ephemeral=True)
 
     async def _stop(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.Stop for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await quest_stop_area(api, int(self.area["id"]))
             await inter.followup.send(f"🛑 Quests **STOPPED** for **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Quests.Stop success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Quests.Stop error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Quest stop area failed")
             await inter.followup.send(f"❌ Stop failed: `{e}`", ephemeral=True)
 
     async def _status(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.Status for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
@@ -856,13 +929,17 @@ class QuestAreaActions(discord.ui.View):
             )
 
             await inter.followup.send(embed=emb, ephemeral=True)
-
+            logger.info(f"[audit] Quests.Status success for {actor} (area={self.area['name']}, total={total})")
         except Exception as e:
+            logger.info(f"[audit] Quests.Status error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Quest area status failed")
             await inter.followup.send(f"❌ Status failed: `{e}`", ephemeral=True)
 
     async def _hours(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.Hours for {self.area['name']} click by {actor}")
         await inter.response.send_modal(QuestHoursModal(self.area))
+        logger.info(f"[audit] Quests.Hours modal opened for {actor} (area={self.area['name']})")
 
 
 async def on_core_quests_click(inter: discord.Interaction):
@@ -884,18 +961,24 @@ class QuestHoursModal(discord.ui.Modal, title="Set Quest Hours"):
         self.area = area
 
     async def on_submit(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Quests.Hours submit by {actor} (area={self.area['name']}, hours={str(self.hours)!r})")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             # Let the DAO do strict validation (0–23 only) and formatting
             changed = await update_area_quest_hours(int(self.area["id"]), str(self.hours))
             if changed:
                 await inter.followup.send(f"🕘 Updated quest hours for **{self.area['name']}**.", ephemeral=True)
+                logger.info(f"[audit] Quests.Hours success for {actor} (area={self.area['name']}, changed=1)")
             else:
                 await inter.followup.send(f"ℹ️ Quest hours unchanged for **{self.area['name']}**.", ephemeral=True)
+                logger.info(f"[audit] Quests.Hours success (no-change) for {actor} (area={self.area['name']})")
         except ValueError as ve:
+            logger.info(f"[audit] Quests.Hours validation error for {actor} (area={self.area['name']}): {ve!r}")
             # Raised by DAO when format invalid
             await inter.followup.send(f"❌ {ve}", ephemeral=True)
         except Exception as e:
+            logger.info(f"[audit] Quests.Hours error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("QuestHoursModal failed")
             await inter.followup.send(f"❌ Update failed: `{e}`", ephemeral=True)
 
@@ -912,19 +995,26 @@ class RecalcMenu(discord.ui.View):
                 child.callback = self._area
 
     async def _area(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Recalc.Area click by {actor}")
         try:
-            async with get_dragonite_client() as api:
-                areas = await status_area_map(api)
+            try:
+                async with get_dragonite_client() as api:
+                    areas = await status_area_map(api)
+            except Exception as e:
+                logger.exception("Fetch areas failed (recalc)")
+                return await inter.response.send_message(f"❌ Failed to load areas: `{e}`", ephemeral=True)
+
+            async def on_pick(i: discord.Interaction, area: dict):
+                view = RecalcAreaActions(area)
+                await i.response.edit_message(content=f"**ReCalc • {area.get('name')}** — choose:", view=view)
+
+            view = PaginatedAreaPicker(areas, on_pick=on_pick, page=0, page_size=25)
+            await inter.response.edit_message(content="**Choose Area** (1/{})".format(max(1, (len(areas)+24)//25)), view=view)
+            logger.info(f"[audit] Recalc.Area picker opened for {actor} (areas={len(areas)})")
         except Exception as e:
+            logger.info(f"[audit] Recalc.Area error for {actor}: {e!r}")
             logger.exception("Fetch areas failed (recalc)")
-            return await inter.response.send_message(f"❌ Failed to load areas: `{e}`", ephemeral=True)
-
-        async def on_pick(i: discord.Interaction, area: dict):
-            view = RecalcAreaActions(area)
-            await i.response.edit_message(content=f"**ReCalc • {area.get('name')}** — choose:", view=view)
-
-        view = PaginatedAreaPicker(areas, on_pick=on_pick, page=0, page_size=25)
-        await inter.response.edit_message(content="**Choose Area** (1/{})".format(max(1, (len(areas)+24)//25)), view=view)
 
 class RecalcAreaActions(discord.ui.View):
     def __init__(self, area: dict):
@@ -944,32 +1034,44 @@ class RecalcAreaActions(discord.ui.View):
                     child.callback = self._pokemon
 
     async def _quest(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Recalc.Quest for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await recalc_quest(api, int(self.area["id"]))
             await inter.followup.send(f"🔁 Recalculated **Quest** for **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Recalc.Quest success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Recalc.Quest error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Recalc quest failed")
             await inter.followup.send(f"❌ Recalc quest failed: `{e}`", ephemeral=True)
 
     async def _fort(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Recalc.Fort for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await recalc_fort(api, int(self.area["id"]))
             await inter.followup.send(f"🔁 Recalculated **Fort** for **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Recalc.Fort success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Recalc.Fort error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Recalc fort failed")
             await inter.followup.send(f"❌ Recalc fort failed: `{e}`", ephemeral=True)
 
     async def _pokemon(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Recalc.Pokemon for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await recalc_pokemon(api, int(self.area["id"]))
             await inter.followup.send(f"🔁 Recalculated **Pokémon** for **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Recalc.Pokemon success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Recalc.Pokemon error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Recalc pokemon failed")
             await inter.followup.send(f"❌ Recalc pokemon failed: `{e}`", ephemeral=True)
 
@@ -1064,20 +1166,28 @@ class AreasMenu(discord.ui.View):
                 child.callback = self._pick
 
     async def _pick(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Areas.Pick click by {actor}")
         try:
-            async with get_dragonite_client() as api:
-                areas = await status_area_map(api)
+            try:
+                async with get_dragonite_client() as api:
+                    areas = await status_area_map(api)
+            except Exception as e:
+                logger.exception("Areas fetch failed")
+                return await inter.response.send_message(f"❌ Failed to load areas: `{e}`", ephemeral=True)
+
+            async def on_pick(i: discord.Interaction, area: dict):
+                view = AreaActions(area)
+                await i.response.edit_message(content=f"**Area • {area.get('name')}** — choose:", view=view)
+
+            view = PaginatedAreaPicker(areas, on_pick=on_pick, page=0, page_size=25)
+            total_pages = max(1, (len(areas)+24)//25)
+            await inter.response.edit_message(content=f"**Choose Area** (1/{total_pages})", view=view)
+            logger.info(f"[audit] Areas.Pick picker opened for {actor} (areas={len(areas)})")
         except Exception as e:
+            logger.info(f"[audit] Areas.Pick error for {actor}: {e!r}")
             logger.exception("Areas fetch failed")
-            return await inter.response.send_message(f"❌ Failed to load areas: `{e}`", ephemeral=True)
 
-        async def on_pick(i: discord.Interaction, area: dict):
-            view = AreaActions(area)
-            await i.response.edit_message(content=f"**Area • {area.get('name')}** — choose:", view=view)
-
-        view = PaginatedAreaPicker(areas, on_pick=on_pick, page=0, page_size=25)
-        total_pages = max(1, (len(areas)+24)//25)
-        await inter.response.edit_message(content=f"**Choose Area** (1/{total_pages})", view=view)
 
 class AreaActions(discord.ui.View):
     def __init__(self, area: dict):
@@ -1097,26 +1207,36 @@ class AreaActions(discord.ui.View):
                     child.callback = self._info
 
     async def _enable(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Areas.Enable for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await start_area(api, int(self.area["id"]))
             await inter.followup.send(f"🟢 **ENABLED** area **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Areas.Enable success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Areas.Enable error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Enable area failed")
             await inter.followup.send(f"❌ Enable failed: `{e}`", ephemeral=True)
 
     async def _disable(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Areas.Disable for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
                 await stop_area(api, int(self.area["id"]))
             await inter.followup.send(f"🛑 **DISABLED** area **{self.area['name']}**.", ephemeral=True)
+            logger.info(f"[audit] Areas.Disable success for {actor} (area={self.area['name']})")
         except Exception as e:
+            logger.info(f"[audit] Areas.Disable error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Disable area failed")
             await inter.followup.send(f"❌ Disable failed: `{e}`", ephemeral=True)
 
     async def _info(self, inter: discord.Interaction):
+        actor = _actor(inter)
+        logger.info(f"[audit] Areas.Info for {self.area['name']} click by {actor}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             async with get_dragonite_client() as api:
@@ -1143,7 +1263,10 @@ class AreaActions(discord.ui.View):
             else:
                 await inter.followup.send(embed=emb, ephemeral=True)
 
+            logger.info(f"[audit] Areas.Info success for {actor} (area={self.area['name']})")
+
         except Exception as e:
+            logger.info(f"[audit] Areas.Info error for {actor} (area={self.area['name']}): {e!r}")
             logger.exception("Area info failed")
             await inter.followup.send(f"❌ Info failed: `{e}`", ephemeral=True)
 
