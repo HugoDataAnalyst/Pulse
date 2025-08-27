@@ -13,6 +13,7 @@ from core.dragonite.gets import (
     recalc_quest,
     recalc_fort,
     recalc_pokemon,
+    reload_accounts,
     reload_proxies,
     reload_global,
     start_area,
@@ -274,6 +275,7 @@ class AccountLookupModal(discord.ui.Modal, title="Lookup Account"):
                 try:
                     changed = await delete_account(username)
                     msg = "🗑️ Account deleted." if changed else "ℹ️ Account not found."
+                    await reload_accounts(api)
                     await _i.followup.send(msg, ephemeral=True)
                 except Exception as e:
                     logger.exception("delete_account failed")
@@ -532,6 +534,10 @@ class UnbanManyModal(discord.ui.Modal, title="Unban accounts"):
 
             # reset banned -> set banned=0, last_banned=NULL
             changed = await reset_banned_accounts(names=names)
+
+            async with get_dragonite_client() as api:
+                await reload_accounts(api)
+
             await inter.followup.send(f"🔧 Unbanned **{changed}** accounts.", ephemeral=True)
             logger.info(f"[audit] Accounts.UnbanMany success for {actor} (changed={changed}, requested={len(names)})")
         except Exception as e:
@@ -635,7 +641,6 @@ class ProxiesMenu(discord.ui.View):
                     url = item.get("url") or ""
                     try:
                         await delete_proxy(api, pid)
-                        await reload_proxies(api)
                         await add_proxy(api, proxy_id=pid, name=name, url=url)
                         await reload_proxies(api)
                         succeeded += 1
@@ -650,7 +655,6 @@ class ProxiesMenu(discord.ui.View):
                         except Exception:
                             pass
 
-                # Refresh server-side state if supported
                 try:
                     await reload_proxies(api)
                 except Exception as e:
