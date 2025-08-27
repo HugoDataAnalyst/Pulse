@@ -3,6 +3,7 @@ from typing import Optional, List, Sequence, Union, Dict, Tuple
 from enum import Enum
 from loguru import logger
 from utils.db import fetch_all_as, fetch_one_as, exec_sql, transaction
+from utils.timing import log_timing
 from core.dragonite.sql.init import DB_KEY
 from core.dragonite.sql.schema import Area, Account
 import config as AppConfig
@@ -25,6 +26,7 @@ _FLAG_RESET_PLAN: dict[str, Dict[str, object]] = {
     "warn":        {"warn": 0, "warn_expiration": 0},
     "auth_banned": {"auth_banned": 0},
 }
+
 
 def _interval_clause(value: int, unit: Union[str, IntervalUnit]) -> str:
     # value must be an int
@@ -49,6 +51,7 @@ def _ensure_provider(p: str) -> str:
     return p
 
 # ---------- Areas ----------
+@log_timing("update_area_quest_hours")
 async def update_area_quest_hours(area_id: int, hours: Sequence[int]) -> int:
     """
     Update quest_mode_hours for an area (comma-separated list).
@@ -71,6 +74,7 @@ async def update_area_quest_hours(area_id: int, hours: Sequence[int]) -> int:
     return await exec_sql(DB_KEY, sql, (text_val, area_id))
 
 # ---------- Stats Accounts ----------
+@log_timing("count_sessions_by_end_reason")
 async def count_sessions_by_end_reason(interval_value: int, interval_unit: Union[str, IntervalUnit]) -> list[dict]:
     """
     SELECT COUNT(*) AS total, reason_for_session_end
@@ -102,10 +106,12 @@ def _plan_updates_from_account_info(acc: dict) -> Dict[str, object]:
             updates.update(reset_map)
     return updates
 
+@log_timing("delete_account")
 async def delete_account(username: str) -> int:
     sql = "DELETE FROM `account` WHERE `username`=%s LIMIT 1"
     return await exec_sql(DB_KEY, sql, (username,))
 
+@log_timing("reactivate_account_from_info")
 async def reactivate_account_from_info(username: str, acc_info: dict) -> int:
     updates = _plan_updates_from_account_info(acc_info)
     if not updates:
@@ -120,6 +126,7 @@ async def reactivate_account_from_info(username: str, acc_info: dict) -> int:
     )
     return await exec_sql(DB_KEY, sql, params)
 
+@log_timing("reactivate_accounts")
 async def reactivate_accounts(usernames: Optional[List[str]] = None) -> int:
     """
     Admin tool: reset ALL standard flags for the provided usernames.
@@ -138,6 +145,7 @@ async def reactivate_accounts(usernames: Optional[List[str]] = None) -> int:
     params = tuple(full_reset[c] for c in cols) + tuple(usernames)
     return await exec_sql(DB_KEY, sql, params)
 
+@log_timing("reset_banned_accounts")
 async def reset_banned_accounts(usernames: Optional[List[str]] = None) -> int:
     if usernames:
         placeholders = ",".join(["%s"] * len(usernames))
@@ -146,6 +154,7 @@ async def reset_banned_accounts(usernames: Optional[List[str]] = None) -> int:
     sql = "UPDATE account SET last_banned=NULL, banned=0"
     return await exec_sql(DB_KEY, sql)
 
+@log_timing("banned_accounts")
 async def banned_accounts(provider: str, interval_value: int, interval_unit: Union[str, IntervalUnit]) -> list[Account]:
     p = _ensure_provider(provider)
     clause = _interval_clause(interval_value, interval_unit)
@@ -157,6 +166,7 @@ async def banned_accounts(provider: str, interval_value: int, interval_unit: Uni
     """
     return await fetch_all_as(DB_KEY, Account, sql, (p,))
 
+@log_timing("banned_usernames")
 async def banned_usernames(provider: str, interval_value: int, interval_unit: Union[str, IntervalUnit]) -> list[str]:
     p = _ensure_provider(provider)
     clause = _interval_clause(interval_value, interval_unit)
@@ -172,6 +182,7 @@ async def banned_usernames(provider: str, interval_value: int, interval_unit: Un
     return [str(r["username"]) for r in rows if r.get("username")]
 
 # ---------- Session Queries ----------
+@log_timing("err_limit_reached")
 async def err_limit_reached(interval_value: int, interval_unit: Union[str, IntervalUnit]) -> list[dict]:
     clause = _interval_clause(interval_value, interval_unit)
     sql = f"""
@@ -198,6 +209,7 @@ async def err_limit_reached(interval_value: int, interval_unit: Union[str, Inter
         (AppConfig.DRAGONITE_ENCOUNTER_LIMIT, AppConfig.DRAGONITE_GMO_LIMIT)
     )
 
+@log_timing("err_disabled")
 async def err_disabled(interval_value: int, interval_unit: Union[str, IntervalUnit]) -> list[dict]:
     clause = _interval_clause(interval_value, interval_unit)
     sql = f"""
