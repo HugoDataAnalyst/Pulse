@@ -191,23 +191,29 @@ async def err_limit_reached(interval_value: int, interval_unit: Union[str, Inter
             reason_for_session_end,
             CONCAT(
                 FLOOR(TIMESTAMPDIFF(SECOND, session_start, session_end) / 3600), ' hours, ',
-                FLOOR((TIMESTAMPDIFF(SECOND, session_start, session_end) % 3600) / 60), ' minutes, ',
-                (TIMESTAMPDIFF(SECOND, session_start, session_end) % 60), ' seconds'
+                FLOOR(MOD(TIMESTAMPDIFF(SECOND, session_start, session_end), 3600) / 60), ' minutes, ',
+                MOD(TIMESTAMPDIFF(SECOND, session_start, session_end), 60), ' seconds'
             ) AS session_duration,
-            COALESCE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER'),0) AS METHOD_ENCOUNTER,
-            COALESCE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS'),0) AS METHOD_GET_MAP_OBJECTS
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER')) AS UNSIGNED), 0) AS METHOD_ENCOUNTER,
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS')) AS UNSIGNED), 0) AS METHOD_GET_MAP_OBJECTS
         FROM stats_accounts
-        WHERE reason_for_session_end LIKE 'ErrLimitReached'
+        WHERE reason_for_session_end = 'ErrLimitReached'
           AND session_end >= {clause}
           AND (
-              COALESCE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER'),0) >= %s
-              OR COALESCE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS'),0) >= %s
+              COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER')) AS UNSIGNED), 0) >= %s
+              OR COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS')) AS UNSIGNED), 0) >= %s
           )
     """
-    return await fetch_all_as(
+    rows = await fetch_all_as(
         DB_KEY, dict, sql,
         (AppConfig.DRAGONITE_ENCOUNTER_LIMIT, AppConfig.DRAGONITE_GMO_LIMIT)
     )
+    logger.debug(f"[sessions] err_limit_reached returned {len(rows)} rows")
+    if rows:
+        from pprint import pformat
+        logger.debug("[sessions] Sample err_limit_reached row:\n{}", pformat(rows[0]))
+    return rows
+
 
 @log_timing("err_disabled")
 async def err_disabled(interval_value: int, interval_unit: Union[str, IntervalUnit]) -> list[dict]:
@@ -218,20 +224,26 @@ async def err_disabled(interval_value: int, interval_unit: Union[str, IntervalUn
             reason_for_session_end,
             CONCAT(
                 FLOOR(TIMESTAMPDIFF(SECOND, session_start, session_end) / 3600), ' hours, ',
-                FLOOR((TIMESTAMPDIFF(SECOND, session_start, session_end) % 3600) / 60), ' minutes, ',
-                (TIMESTAMPDIFF(SECOND, session_start, session_end) % 60), ' seconds'
+                FLOOR(MOD(TIMESTAMPDIFF(SECOND, session_start, session_end), 3600) / 60), ' minutes, ',
+                MOD(TIMESTAMPDIFF(SECOND, session_start, session_end), 60), ' seconds'
             ) AS session_duration,
-            COALESCE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER'),0) AS METHOD_ENCOUNTER,
-            COALESCE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS'),0) AS METHOD_GET_MAP_OBJECTS
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER')) AS UNSIGNED), 0) AS METHOD_ENCOUNTER,
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS')) AS UNSIGNED), 0) AS METHOD_GET_MAP_OBJECTS
         FROM stats_accounts
-        WHERE reason_for_session_end LIKE 'ErrDisabled'
+        WHERE reason_for_session_end = 'ErrDisabled'
           AND session_end >= {clause}
           AND (
-              COALESCE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER'),0) < %s
-              AND COALESCE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS'),0) < %s
+              COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_ENCOUNTER')) AS UNSIGNED), 0) < %s
+              AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(counts, '$.METHOD_GET_MAP_OBJECTS')) AS UNSIGNED), 0) < %s
           )
     """
-    return await fetch_all_as(
+    rows = await fetch_all_as(
         DB_KEY, dict, sql,
         (AppConfig.DRAGONITE_ENCOUNTER_LIMIT, AppConfig.DRAGONITE_GMO_LIMIT)
     )
+    logger.debug(f"[sessions] err_disabled returned {len(rows)} rows")
+    if rows:
+        from pprint import pformat
+        logger.debug("[sessions] Sample err_disabled row:\n{}", pformat(rows[0]))
+    return rows
+
