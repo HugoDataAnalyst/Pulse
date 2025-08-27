@@ -15,6 +15,9 @@ def _fmt_int(n) -> str:
     except Exception:
         return str(n)
 
+def _fmt_pct(n: float) -> str:
+    return f"{n:.0f}%"
+
 def _fmt_ts(epoch: int | None) -> str:
     try:
         e = int(epoch or 0)
@@ -60,6 +63,20 @@ def _bar_green(current: int, total: int, length: int = 14) -> str:
     full = int(round(ratio * length))
     return "🟩" * full + "⬜" * (length - full)
 
+# ADD this near the other bar helpers
+
+def _bar_enc_gmo(enc: int, gmo: int, length: int = 18) -> str:
+    """
+    Blue (🟦) for Encounter, Yellow (🟨) for GMO — stacked bar.
+    """
+    enc = max(0, int(enc or 0))
+    gmo = max(0, int(gmo or 0))
+    total = enc + gmo
+    if total <= 0:
+        return "⬜" * length
+    return _bar_stacked([(enc, "🟦"), (gmo, "🟨")], total, length)
+
+
 def _bar_good_bad(good: int, bad: int, length: int = 18) -> str:
     total = max(0, good) + max(0, bad)
     if total <= 0:
@@ -89,6 +106,50 @@ def _flag(name: str, v: bool) -> str:
 
 def _maybe(v) -> str:
     return "—" if v in (None, "", 0, False) else str(v)
+
+
+def _health_color(active: int, expected: int) -> int:
+    pct = _safe_div(active, expected)
+    if pct >= 90:
+        return 0x3BA55D  # green
+    if pct >= 60:
+        return 0xFEE75C  # yellow
+    if pct >= 30:
+        return 0xFAA61A  # orange
+    return 0xED4245      # red
+
+def _shorten(text: str, limit: int = 1024) -> str:
+    return text if len(text) <= limit else text[:limit-1] + "…"
+
+# ---------- Builders ----------
+def _fmt_modes_field(modes: dict, top_n: int = 6) -> str:
+    if not modes:
+        return "—"
+    items = [(m, d.get("workers", 0)) for m, d in modes.items()]
+    items.sort(key=lambda x: x[1], reverse=True)
+
+    top = items[:top_n]
+    rest = items[top_n:]
+
+    lines = [f"• **{m}** — {_fmt_int(w)} worker(s)" for m, w in top]
+    if rest:
+        total_rest = sum(w for _, w in rest)
+        lines.append(f"• **+{len(rest)} more** — {_fmt_int(total_rest)} worker(s)")
+    return _shorten("\n".join(lines))
+
+def _fmt_providers_block(summary: dict) -> str:
+    provs = summary.get("providers", {})
+    if not provs:
+        return "—"
+    lines = []
+    for p, d in sorted(provs.items()):
+        total = int(d.get("total", 0) or 0)
+        good = int(d.get("good", 0) or 0)
+        bad  = int(d.get("bad", 0) or 0)
+        pct  = _safe_div(good, total)
+        bar  = _bar_good_bad(good, bad, length=12)
+        lines.append(f"**{p}**  {bar}  {_fmt_pct(pct)}  (G:{_fmt_int(good)} / T:{_fmt_int(total)})")
+    return _shorten("\n".join(lines))
 
 # ---------- Helpers for Areas in Core ----------
 def _on_off(v: bool) -> str:
