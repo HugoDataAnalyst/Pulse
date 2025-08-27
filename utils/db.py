@@ -3,6 +3,7 @@ import aiomysql
 from contextlib import asynccontextmanager
 from typing import Any, Type, TypeVar, Optional
 from pydantic import BaseModel, TypeAdapter
+from loguru import logger
 
 # ── Pool registry (multi-DB)
 _pools: dict[str, aiomysql.Pool] = {}
@@ -22,6 +23,7 @@ async def ensure_pool(
 ) -> None:
     """Create or reuse a pool identified by `key`."""
     if key in _pools and not _pools[key].closed:
+        logger.debug(f"[db] Pool '{key}' already active")
         return
     _pools[key] = await aiomysql.create_pool(
         host=host,
@@ -35,12 +37,14 @@ async def ensure_pool(
         charset=charset,
         cursorclass=aiomysql.DictCursor,
     )
+    logger.success(f"[db] Pool '{key}' connected to {user}@{host}:{port}/{db}")
 
 async def close_pool(key: str) -> None:
     pool = _pools.pop(key, None)
     if pool:
         pool.close()
         await pool.wait_closed()
+        logger.info(f"[db] Pool '{key}' closed")
 
 async def close_all_pools() -> None:
     for key, pool in list(_pools.items()):
