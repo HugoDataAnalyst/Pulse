@@ -1,9 +1,12 @@
 from __future__ import annotations
-from typing import List, Dict, Tuple
+from typing import List, Tuple, TypedDict
 import math
 import plotly.graph_objects as go
+from loguru import logger
 
-Coord = Dict[str, float]  # {"lat": float, "lon": float}
+class Coord(TypedDict):
+    lat: float
+    lon: float
 
 def _close_ring(points: List[Coord]) -> Tuple[List[float], List[float]]:
     if not points:
@@ -94,7 +97,6 @@ def render_geofence_png(geofence: List[Coord], width: int = 900, height: int = 5
     try:
         png = fig.to_image(format="png", engine="kaleido", width=width, height=height, scale=1)
     except Exception as e:
-        if "kaleido" in str(e).lower():
-            raise RuntimeError("Plotly static export requires 'kaleido' (pip install kaleido)") from e
+        logger.error(f"render_geofence_png: failed to render: {e}")
         raise
     return png, "geofence.png"
