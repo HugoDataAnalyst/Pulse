@@ -21,6 +21,11 @@ from stats.ui.handlers_stats import (
 from subs.ui.handlers_subs import on_subtime_click
 from utils.db import close_all_pools, close_pool
 from core.dragonite.sql.init import ensure_dragonite_pool, DB_KEY
+from services.appscheduler import AppScheduler
+from services.jobs.account_watchers import (
+    make_err_disabled_job,
+    make_banned_usernames_job,
+)
 
 def to_int(v):
     try: return int(v) if v else None
@@ -41,6 +46,7 @@ class PulseClient(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._core_overview_updater: CoreOverviewUpdater | None = None
+        self._scheduler: AppScheduler | None = None
 
     async def setup_hook(self):
         await ensure_dragonite_pool()
@@ -84,10 +90,22 @@ class PulseClient(discord.Client):
         if CORE_OVERVIEW_CHANNEL_ID:
             self._core_overview_updater = CoreOverviewUpdater(self, CORE_OVERVIEW_CHANNEL_ID, interval_s=60)
             self._core_overview_updater.start()
+        # ---- Start scheduler + jobs ----
+        self._scheduler = AppScheduler()
+        # intervals (seconds)
+        self._scheduler.every("err_disabled_24h",  1 * 60, make_err_disabled_job(self))
+        self._scheduler.every("banned_nk_24h",     1 * 60, make_banned_usernames_job(self, "nk", 24))
+        self._scheduler.every("banned_ptc_24h",    1 * 60, make_banned_usernames_job(self, "ptc", 24))
+        # -------------------------------------
 
     async def close(self):
         if self._core_overview_updater:
             self._core_overview_updater.stop()
+        if self._scheduler:
+            try:
+                await self._scheduler.stop()
+            except Exception as e:
+                logger.warning(f"Scheduler stop failed: {e}")
         try:
             await close_pool(DB_KEY)
         except Exception as e:
