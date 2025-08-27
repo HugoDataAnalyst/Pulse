@@ -59,8 +59,64 @@ class HubView(discord.ui.View):
         return btn
 
 # ---------- Hub posting helpers ----------
-async def post_hub(channel: discord.abc.Messageable, title: str, specs: Iterable[ButtonSpec], admin_ids: Set[int]):
+async def _find_existing_hub_message(
+    channel: discord.abc.Messageable,
+    title: str,
+    search_limit: int = 50,
+) -> discord.Message | None:
+    """
+    Looks for a recent message by this bot that either:
+      - starts with "**{title}**" in content, or
+      - has an embed[0].title == title
+    Returns the first match or None.
+    """
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return None
+
+    me = channel.guild.me if hasattr(channel, "guild") and channel.guild else None
+    my_id = me.id if me else None
+
+    try:
+        async for m in channel.history(limit=search_limit):
+            # only bot's own messages
+            if my_id is not None and m.author.id != my_id:
+                continue
+
+            # match by content header
+            if m.content and m.content.strip().startswith(f"**{title}**"):
+                return m
+
+            # match by first embed title
+            if m.embeds and m.embeds[0].title == title:
+                return m
+    except Exception as e:
+        logger.warning(f"_find_existing_hub_message: history fetch failed: {e}")
+    return None
+
+async def post_hub(
+    channel: discord.abc.Messageable,
+    title: str,
+    specs: Iterable[ButtonSpec],
+    admin_ids: Set[int],
+    *,
+    search_limit: int = 50,
+) -> None:
+    """
+    Idempotent hub poster:
+      - If an existing hub message is found, EDIT it (content + view).
+      - Otherwise, SEND a fresh one.
+    Your existing calls can stay the same.
+    """
     view = HubView(title, specs, admin_ids)
+
+    existing = await _find_existing_hub_message(channel, title, search_limit=search_limit)
+    if existing:
+        try:
+            await existing.edit(content=f"**{title}**\nPick an option:", view=view)
+            return
+        except Exception as e:
+            logger.warning(f"post_hub: edit failed, will send new: {e}")
+
     await channel.send(f"**{title}**\nPick an option:", view=view)
 
 def register_persistent_views(client: discord.Client, hubs: Iterable[HubView]):
@@ -74,15 +130,19 @@ def register_persistent_views(client: discord.Client, hubs: Iterable[HubView]):
 # ---------- Section-specific factories ----------
 def core_specs(
     *,
-    on_core: ClickHandler,
     on_accounts: ClickHandler,
     on_proxies: ClickHandler,
+    on_areas: ClickHandler,
+    on_quests: ClickHandler,
+    on_recalc: ClickHandler,
     admin_only: bool = True,
 ) -> list[ButtonSpec]:
     return [
-        ButtonSpec("pulse:core:core",     "Core",     discord.ButtonStyle.primary,   on_core,     admin_only),
         ButtonSpec("pulse:core:accounts", "Accounts", discord.ButtonStyle.secondary, on_accounts, admin_only),
         ButtonSpec("pulse:core:proxies",  "Proxies",  discord.ButtonStyle.success,   on_proxies,  admin_only),
+        ButtonSpec("pulse:core:areas",    "Areas",    discord.ButtonStyle.primary,   on_areas,    admin_only),
+        ButtonSpec("pulse:core:quests",   "Quests",   discord.ButtonStyle.primary,   on_quests,   admin_only),
+        ButtonSpec("pulse:core:recalc",   "ReCalc",   discord.ButtonStyle.danger,    on_recalc,   admin_only),
     ]
 
 def stats_specs(
