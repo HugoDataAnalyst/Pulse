@@ -88,3 +88,7 @@ async def stop_area(client: APIClient, area_id: int) -> Dict[str, Any]:
 
 async def info_area(client: APIClient, area_id: int) -> Dict[str, Any]:
     return await client.get(f"/areas/{area_id}")
+
+# --------- Global --------
+async def reload_global(client: APIClient) -> Dict[str, Any]:
+    return await client.get("/reload")
