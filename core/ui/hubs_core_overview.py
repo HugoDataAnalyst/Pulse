@@ -1,96 +1,115 @@
+import json
 import asyncio
 from datetime import datetime, timezone
 import discord
 from loguru import logger
-
+import config as AppConfig
 from core.dragonite.init import get_dragonite_client
 from core.dragonite.processors import status_overview, proxies_provider_summary
+from core.dragonite.sql.dao import (
+    err_disabled,
+    err_limit_reached,
+    IntervalUnit,
+)
+from utils.handlers_helpers import (
+    _actor,
+    _fmt_int,
+    _fmt_pct,
+    _fmt_ts,
+    _safe_div,
+    _bar_stacked,
+    _bar_green,
+    _bar_good_bad,
+    _bar_enc_gmo,
+    _yn,
+    _flag,
+    _maybe,
+    _health_color,
+    _shorten,
+    _fmt_modes_field,
+    _fmt_providers_block,
+    _on_off,
+    _yes_no,
+    _parse_interval_unit,
+    _parse_usernames_block,
+    _parse_hours_list,
+    _INTERVAL_ALIASES,
+)
 
-# ---------- Formatting helpers ----------
-def _fmt_int(n) -> str:
+async def _format_accounts_sessions_block(
+    window_value: int = 24,
+    window_unit: IntervalUnit = IntervalUnit.HOUR,
+) -> str:
+    """
+    Fetch session rows (ErrLimitReached / ErrDisabled) for the given window and
+    return a compact, human-friendly summary string for the embed.
+    """
     try:
-        return f"{int(n):,}"
-    except Exception:
-        return str(n)
+        lr_rows = await err_limit_reached(window_value, window_unit)
+        ds_rows = await err_disabled(window_value, window_unit)
 
-def _fmt_pct(n: float) -> str:
-    return f"{n:.0f}%"
+        enc_limit = int(AppConfig.DRAGONITE_ENCOUNTER_LIMIT)
+        gmo_limit = int(AppConfig.DRAGONITE_GMO_LIMIT)
 
-def _safe_div(n: float, d: float) -> float:
-    return (n / d * 100.0) if d else 0.0
+        def _to_int(val) -> int:
+            if val is None:
+                return 0
+            if isinstance(val, (int, float)):
+                return int(val)
+            s = str(val).strip()
+            if s.startswith('"') and s.endswith('"'):
+                s = s[1:-1].strip()
+            try:
+                return int(float(s))
+            except Exception:
+                return 0
 
-def _bar_green(current: int, total: int, length: int = 16) -> str:
-    """Green health bar: 🟩 filled, ⬜ empty."""
-    if total <= 0:
-        return "⬜" * length
-    ratio = max(0.0, min(1.0, current / total))
-    full = int(round(ratio * length))
-    return "🟩" * full + "⬜" * (length - full)
-
-def _bar_good_bad(good: int, bad: int, length: int = 12) -> str:
-    """Provider bar: 🟩 for good, 🟥 for bad, ⬜ if any spare."""
-    total = max(0, good) + max(0, bad)
-    if total <= 0:
-        return "⬜" * length
-    good_len = int(round((good / total) * length)) if total else 0
-    bad_len  = int(round((bad  / total) * length)) if total else 0
-    # adjust rounding to fit exactly 'length'
-    while good_len + bad_len > length:
-        if bad_len > good_len and bad_len > 0:
-            bad_len -= 1
-        elif good_len > 0:
-            good_len -= 1
+        # --- ErrLimitReached
+        lr_total = len(lr_rows)
+        if lr_total > 0:
+            lr_enc = lr_gmo = 0
+            for r in lr_rows:
+                enc = _to_int(r.get("METHOD_ENCOUNTER"))
+                gmo = _to_int(r.get("METHOD_GET_MAP_OBJECTS"))
+                if enc >= enc_limit:
+                    lr_enc += 1
+                if gmo >= gmo_limit:
+                    lr_gmo += 1
+            lr_bar = _bar_enc_gmo(lr_enc, lr_gmo, length=18)
+            lr_block = (
+                f"**✅ ErrLimitReached**  {lr_bar}\n"
+                f"🟦 Enc ≥{_fmt_int(enc_limit)}: **{_fmt_int(lr_enc)}**  •  "
+                f"🟨 GMO ≥{_fmt_int(gmo_limit)}: **{_fmt_int(lr_gmo)}**  "
+                f"(Total: **{_fmt_int(lr_total)}**)"
+            )
         else:
-            break
-    while good_len + bad_len < length:
-        if good_len <= bad_len:
-            good_len += 1
+            lr_block = "**✅ ErrLimitReached**  0"
+
+        # --- ErrDisabled
+        ds_total = len(ds_rows)
+        if ds_total > 0:
+            ds_enc = ds_gmo = 0
+            for r in ds_rows:
+                enc = _to_int(r.get("METHOD_ENCOUNTER"))
+                gmo = _to_int(r.get("METHOD_GET_MAP_OBJECTS"))
+                if enc < enc_limit:
+                    ds_enc += 1
+                if gmo < gmo_limit:
+                    ds_gmo += 1
+            ds_bar = _bar_enc_gmo(ds_enc, ds_gmo, length=18)
+            ds_block = (
+                f"**🔴 ErrDisabled**  {ds_bar}\n"
+                f"🟦 Enc <{_fmt_int(enc_limit)}: **{_fmt_int(ds_enc)}**  •  "
+                f"🟨 GMO <{_fmt_int(gmo_limit)}: **{_fmt_int(ds_gmo)}**  "
+                f"(Total: **{_fmt_int(ds_total)}**)"
+            )
         else:
-            bad_len += 1
-    return "🟩" * good_len + "🟥" * bad_len
+            ds_block = "**🔴 ErrDisabled**  0"
 
-def _health_color(active: int, expected: int) -> int:
-    pct = _safe_div(active, expected)
-    if pct >= 90:
-        return 0x3BA55D  # green
-    if pct >= 60:
-        return 0xFEE75C  # yellow
-    if pct >= 30:
-        return 0xFAA61A  # orange
-    return 0xED4245      # red
-
-def _shorten(text: str, limit: int = 1024) -> str:
-    return text if len(text) <= limit else text[:limit-1] + "…"
-
-# ---------- Builders ----------
-def _fmt_modes_field(modes: dict, top_n: int = 6) -> str:
-    if not modes:
+        return f"{lr_block}\n\n{ds_block}"
+    except Exception as e:
+        logger.warning("Core overview sessions block failed: {!r}", e)
         return "—"
-    items = [(m, d.get("workers", 0)) for m, d in modes.items()]
-    items.sort(key=lambda x: x[1], reverse=True)
-
-    top = items[:top_n]
-    rest = items[top_n:]
-
-    lines = [f"• **{m}** — {_fmt_int(w)} worker(s)" for m, w in top]
-    if rest:
-        total_rest = sum(w for _, w in rest)
-        lines.append(f"• **+{len(rest)} more** — {_fmt_int(total_rest)} worker(s)")
-    return _shorten("\n".join(lines))
-
-def _fmt_providers_block(summary: dict) -> str:
-    provs = summary.get("providers", {})
-    if not provs:
-        return "—"
-    lines = []
-    for p, d in sorted(provs.items()):
-        total = int(d.get("total", 0) or 0)
-        good = int(d.get("good", 0) or 0)
-        bad  = int(d.get("bad", 0) or 0)
-        pct  = _safe_div(good, total)
-        bar  = _bar_good_bad(good, bad, length=12)
-        lines.append(f"**{p}**  {bar}  {_fmt_pct(pct)}  (G:{_fmt_int(good)} / T:{_fmt_int(total)})")
-    return _shorten("\n".join(lines))
 
 async def _build_core_overview_embed() -> discord.Embed:
     async with get_dragonite_client() as api:
@@ -105,6 +124,9 @@ async def _build_core_overview_embed() -> discord.Embed:
     health  = _safe_div(act_all, exp_all)
 
     color = _health_color(act_all, exp_all)
+
+    # Accounts sessions (24h)
+    sessions_block = await _format_accounts_sessions_block(24, IntervalUnit.HOUR)
     emb = discord.Embed(
         title="Pulse • Core Overview",
         description=(
@@ -143,6 +165,12 @@ async def _build_core_overview_embed() -> discord.Embed:
     emb.add_field(
         name="🛰️ Providers",
         value=_fmt_providers_block(prox),
+        inline=False,
+    )
+
+    emb.add_field(
+        name="👤 Accounts Sessions (24h)",
+        value=sessions_block,
         inline=False,
     )
 
@@ -206,7 +234,7 @@ class CoreOverviewUpdater:
                         emb = await _build_core_overview_embed()
                         await msg.edit(embed=emb)
                     except Exception as e:
-                        logger.warning(f"CoreOverviewUpdater: edit failed: {e}")
+                        logger.warning("CoreOverviewUpdater: edit failed: {!r}", e)
                 await asyncio.sleep(self.interval_s)
         except asyncio.CancelledError:
             pass
