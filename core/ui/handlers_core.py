@@ -433,8 +433,8 @@ class BannedActions(discord.ui.View):
     def __init__(self, default_usernames: list[str]):
         super().__init__(timeout=120)
         self.default_usernames = default_usernames or []
-        self.add_item(discord.ui.Button(label="Lookup…", style=discord.ButtonStyle.primary, custom_id="pulse:acc:banned:lookup"))
-        self.add_item(discord.ui.Button(label="Unban…",  style=discord.ButtonStyle.success, custom_id="pulse:acc:banned:unban"))
+        self.add_item(discord.ui.Button(label="Lookup", style=discord.ButtonStyle.primary, custom_id="pulse:acc:banned:lookup"))
+        self.add_item(discord.ui.Button(label="Unban",  style=discord.ButtonStyle.success, custom_id="pulse:acc:banned:unban"))
 
         for child in self.children:
             if isinstance(child, discord.ui.Button):
@@ -533,7 +533,7 @@ class UnbanManyModal(discord.ui.Modal, title="Unban accounts"):
                 return await inter.followup.send("❌ No usernames provided.", ephemeral=True)
 
             # reset banned -> set banned=0, last_banned=NULL
-            changed = await reset_banned_accounts(names=names)
+            changed = await reset_banned_accounts(usernames=names)
 
             async with get_dragonite_client() as api:
                 await reload_accounts(api)
