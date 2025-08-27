@@ -1,9 +1,8 @@
 from __future__ import annotations
 import io
-from pathlib import Path
 from typing import Iterable, Set
-from loguru import logger
 import discord
+from loguru import logger
 
 import config as AppConfig
 from core.dragonite.sql.dao import (
@@ -45,8 +44,7 @@ def _to_set(v) -> Set[str]:
 
 
 # ---------- err_disabled ----------
-# We want to consider a "unique" disabled hit by more than username so that
-# changes (ENC/GMO/duration) re-trigger a notification. Build a composite key.
+# Use a composite key so the same username can re-notify if its details change.
 def _err_disabled_key(row: dict) -> str:
     u = str(row.get("username") or "").strip()
     # These already come casted to ints (via DAO)
@@ -60,8 +58,9 @@ def _err_disabled_key(row: dict) -> str:
 def make_err_disabled_job(client: discord.Client, window_hours: int = 24) -> callable:
     """
     Poll ErrDisabled in last `window_hours`.
-    - Store ALL seen composites in data/err_disabled_seen_keys.json.
-    - Notify ONLY brand-new composites since last run.
+    - Persist *current* composite keys each run to data/err_disabled_seen_keys.json
+      (so vanished items are purged).
+    - Notify ONLY brand-new composites vs the previous run.
     """
     seen_path = DATA_DIR / "err_disabled_seen_keys.json"
 
@@ -77,24 +76,35 @@ def make_err_disabled_job(client: discord.Client, window_hours: int = 24) -> cal
 
         # Build composite keys; remember everything we've ever seen
         current_keys: Set[str] = {_err_disabled_key(r) for r in rows}
-        seen_keys: Set[str] = _to_set(load_json(seen_path, []))
+        before: Set[str] = _to_set(load_json(seen_path, []))
 
-        new_keys = sorted(current_keys - seen_keys)
+        new_keys = sorted(current_keys - before)
+        logger.debug(
+            "[err_disabled_job] before={}, current={}, new={}",
+            len(before), len(current_keys), len(new_keys)
+        )
+
+        # Always persist the *current* set so stale entries are removed
+        if before != current_keys:
+            save_json(seen_path, sorted(current_keys))
+            logger.debug(
+                "[err_disabled_job] updated store (purge/refresh) to {} keys",
+                len(current_keys)
+            )
+
         if not new_keys:
-            logger.debug("[err_disabled_job] no new composites")
+            # Nothing new to notify; we already refreshed the store.
             return
 
-        # Prepare lines (username + counters + duration)
-        # Map key -> row quickly
+        # Map key -> row for details
         idx = { _err_disabled_key(r): r for r in rows }
         lines: list[str] = []
         for k in new_keys:
             r = idx.get(k)
             if not r:
-                # Edge case (shouldn’t happen): fallback to plain key
-                lines.append(k)
+                lines.append(k)  # extremely unlikely; fallback
                 continue
-            u = str(r.get("username") or "?")
+            u   = str(r.get("username") or "?")
             enc = r.get("METHOD_ENCOUNTER")
             gmo = r.get("METHOD_GET_MAP_OBJECTS")
             dur = r.get("session_duration") or ""
@@ -102,27 +112,22 @@ def make_err_disabled_job(client: discord.Client, window_hours: int = 24) -> cal
 
         header = f"🔴 **ErrDisabled** new (last {window_hours}h) — **{len(lines)}**"
         await _notify_msg_or_file(
-            ch,
-            header,
-            lines,
-            filename_prefix="err_disabled",
-            inline_threshold=50,
+            ch, header, lines, filename_prefix="err_disabled", inline_threshold=50
         )
-
-        # Merge + persist all seen keys
-        updated = sorted(seen_keys | current_keys)
-        save_json(seen_path, updated)
-        logger.info("[err_disabled_job] recorded seen total={}, new={}", len(updated), len(new_keys))
+        logger.info("[err_disabled_job] notified {} new composites", len(lines))
 
     return job
 
 
 # ---------- banned_usernames ----------
-def make_banned_usernames_job(client: discord.Client, provider: str = "nk", window_hours: int = 24) -> callable:
+def make_banned_usernames_job(
+    client: discord.Client, provider: str = "nk", window_hours: int = 24
+) -> callable:
     """
     Poll banned_usernames(provider, window_hours).
-    - Store ALL seen usernames for that provider (data/banned_seen_{provider}.json).
-    - Notify ONLY brand-new usernames since last run.
+    - Persist the *current* usernames for that provider to data/banned_seen_{provider}.json
+      (so unbanned users are purged).
+    - Notify ONLY brand-new usernames vs the previous run.
     """
     seen_path = DATA_DIR / f"banned_seen_{provider}.json"
 
@@ -135,25 +140,27 @@ def make_banned_usernames_job(client: discord.Client, provider: str = "nk", wind
 
         rows: Iterable[str] = await banned_usernames(provider, window_hours, IntervalUnit.HOUR)
         current: Set[str] = {str(u).strip() for u in rows if str(u).strip()}
-        seen: Set[str] = _to_set(load_json(seen_path, []))
+        before: Set[str] = _to_set(load_json(seen_path, []))
 
-        new = sorted(current - seen)
-        logger.debug("[banned_job:{}] fetched={} seen={} new={}", provider, len(current), len(seen), len(new))
+        new = sorted(current - before)
+        logger.debug(
+            "[banned_job:{}] before={}, current={}, new={}",
+            provider, len(before), len(current), len(new)
+        )
+
+        # Always persist the *current* set so removed usernames are purged
+        if before != current:
+            save_json(seen_path, sorted(current))
+            logger.debug("[banned_job:{}] updated store to {}", provider, len(current))
+
         if not new:
+            # Nothing new to notify; store already refreshed.
             return
 
         header = f"🚫 **Banned** new ({provider}, last {window_hours}h) — **{len(new)}**"
         await _notify_msg_or_file(
-            ch,
-            header,
-            new,  # one username per line
-            filename_prefix=f"banned_{provider}",
-            inline_threshold=50,
+            ch, header, new, filename_prefix=f"banned_{provider}", inline_threshold=50
         )
-
-        # Merge + persist all seen
-        updated = sorted(seen | current)
-        save_json(seen_path, updated)
-        logger.info("[banned_job:{}] recorded seen total={}, new={}", provider, len(updated), len(new))
+        logger.info("[banned_job:{}] notified {} new usernames", provider, len(new))
 
     return job
