@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord import app_commands
 from loguru import logger
@@ -142,4 +143,7 @@ class PulseClient(discord.Client):
 client = PulseClient()
 
 async def start(token: str):
-    await client.start(token)
+    try:
+        await client.start(token)
+    except asyncio.CancelledError:
+        pass
