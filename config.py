@@ -76,6 +76,12 @@ SUB_DB_USER = get_env_var("SUB_DB_USER")
 SUB_DB_PASSWORD = get_env_var("SUB_DB_PASSWORD")
 SUB_DB_NAME = get_env_var("SUB_DB_NAME")
 
+# PSYDUCKV2
+PSYDUCKV2_URL = get_env_var("PSYDUCKV2_URL", None)
+PSYDUCKV2_API_HEADER = get_env_var("PSYDUCKV2_API_HEADER", None)
+PSYDUCKV2_API_HEADER_SECRET = get_env_var("PSYDUCKV2_API_HEADER_SECRET", None)
+PSYDUCKV2_API_SECRET_KEY = get_env_var("PSYDUCKV2_API_SECRET_KEY", None)
+
 # Logging
 log_level = get_env_var("LOG_LEVEL", "INFO").upper()
 log_file = get_env_var("LOG_FILE", "FALSE").upper() == "TRUE"
