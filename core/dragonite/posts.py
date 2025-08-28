@@ -22,7 +22,6 @@ async def add_proxy(client: APIClient, *, proxy_id: int, name: str, url: str) ->
     }
     res = await client.post("/proxies/", json=payload)
 
-    # Debug log
     #logger.debug(f"[add_proxy] Sent: {payload} | Response: {res}")
     logger.debug(f"[add_proxy] Proxy ID: {proxy_id} | Response: {res}")
 

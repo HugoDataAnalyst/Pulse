@@ -1,4 +1,3 @@
-# core/rotom/processors.py
 from __future__ import annotations
 import re
 from typing import Dict, List, Tuple, Any
@@ -32,7 +31,6 @@ def _parse_labels(s: str) -> Dict[str, str]:
             break
         key, val = m.group(1), m.group(2).replace(r'\"', '"')
         out[key] = val
-        # Move i to after this pair; expect optional comma
         i = m.end()
         if i < len(s) and s[i] == ",":
             i += 1

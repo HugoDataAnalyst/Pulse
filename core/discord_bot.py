@@ -9,7 +9,8 @@ from core.ui.handlers_core import (
     on_proxies_click,
     on_core_areas_click,
     on_core_quests_click,
-    on_core_recalc_click
+    on_core_recalc_click,
+    on_core_devices_click,
 )
 from core.ui.hubs_core_overview import CoreOverviewUpdater  # <— auto-refresh overview
 from stats.ui.handlers_stats import (
@@ -25,6 +26,9 @@ from services.appscheduler import AppScheduler
 from services.jobs.account_watchers import (
     make_err_disabled_job,
     make_banned_usernames_job,
+)
+from services.jobs.rotom_watchers import (
+    make_rotom_offline_watch_job,
 )
 
 def to_int(v):
@@ -57,6 +61,7 @@ class PulseClient(discord.Client):
         self.add_view(hubs_ui.HubView(
             "Pulse • Core",
             hubs_ui.core_specs(
+                on_devices=on_core_devices_click,
                 on_accounts=on_accounts_click,
                 on_proxies=on_proxies_click,
                 on_areas=on_core_areas_click,
@@ -96,6 +101,7 @@ class PulseClient(discord.Client):
         self._scheduler.every("err_disabled_24h",  1 * 60, make_err_disabled_job(self))
         self._scheduler.every("banned_nk_24h",     1 * 60, make_banned_usernames_job(self, "nk", 24))
         self._scheduler.every("banned_ptc_24h",    1 * 60, make_banned_usernames_job(self, "ptc", 24))
+        self._scheduler.every("rotom_offline_10m", 1 * 60, make_rotom_offline_watch_job(self))
         # -------------------------------------
 
     async def close(self):
@@ -121,6 +127,7 @@ class PulseClient(discord.Client):
                     ch,
                     "Pulse • Core",
                     hubs_ui.core_specs(
+                        on_devices=on_core_devices_click,
                         on_accounts=on_accounts_click,
                         on_proxies=on_proxies_click,
                         on_areas=on_core_areas_click,

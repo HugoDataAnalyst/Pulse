@@ -1,4 +1,3 @@
-# core/rotom/gets.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from loguru import logger
@@ -9,7 +8,7 @@ async def get_status(api: APIClient) -> Dict[str, Any]:
     """GET /api/status"""
     try:
         res = await api.get_json("/api/status")
-        logger.debug(f"[rotom] get_status -> {res!r}")
+        #logger.debug(f"[rotom] get_status -> {res!r}")
         return res or {}
     except Exception as e:
         logger.exception(f"[rotom] get_status failed: {e}")
@@ -30,7 +29,7 @@ async def get_job_list(api: APIClient) -> Dict[str, Dict[str, Any]]:
 async def job_status_all(api: APIClient) -> List[Dict[str, Any]]:
     """
     GET /api/job/status
-    Some Rotom variants return the status of all jobs here.
+    Return the status of all jobs here.
     """
     try:
         res = await api.get_json("/api/job/status")
@@ -44,7 +43,7 @@ async def job_status_all(api: APIClient) -> List[Dict[str, Any]]:
 async def get_public_ip_list(api: APIClient) -> List[Dict[str, str]]:
     """
     GET /api/getPublicIp
-    (Based on your note: 'List of all deviceIds'—many Rotom builds expose device ids here.)
+    List of all deviceIds.
     """
     try:
         res = await api.get("/api/getPublicIp")

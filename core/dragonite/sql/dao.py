@@ -7,6 +7,7 @@ from utils.timing import log_timing
 from core.dragonite.sql.init import DB_KEY
 from core.dragonite.sql.schema import Area, Account
 import config as AppConfig
+from pprint import pformat
 
 # ---------- Strict interval enum ----------
 class IntervalUnit(str, Enum):
@@ -210,7 +211,6 @@ async def err_limit_reached(interval_value: int, interval_unit: Union[str, Inter
     )
     logger.debug(f"[sessions] err_limit_reached returned {len(rows)} rows")
     if rows:
-        from pprint import pformat
         logger.debug("[sessions] Sample err_limit_reached row:\n{}", pformat(rows[0]))
     return rows
 
@@ -243,7 +243,6 @@ async def err_disabled(interval_value: int, interval_unit: Union[str, IntervalUn
     )
     logger.debug(f"[sessions] err_disabled returned {len(rows)} rows")
     if rows:
-        from pprint import pformat
         logger.debug("[sessions] Sample err_disabled row:\n{}", pformat(rows[0]))
     return rows
 

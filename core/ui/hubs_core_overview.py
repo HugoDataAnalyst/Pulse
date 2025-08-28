@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import discord
 from loguru import logger
 import config as AppConfig
+from core.rotom.init import get_rotom_client
+from core.rotom.processors import rotom_overview
 from core.dragonite.init import get_dragonite_client
 from core.dragonite.processors import status_overview, proxies_provider_summary
 from core.dragonite.sql.dao import (
@@ -35,6 +37,39 @@ from utils.handlers_helpers import (
     _parse_hours_list,
     _INTERVAL_ALIASES,
 )
+
+async def _format_rotom_block() -> str:
+    """
+    Build a compact Rotom overview block:
+    - Devices: alive vs total  (green bar + %)
+    - Workers: active vs total (green bar + %)
+    """
+    try:
+        async with get_rotom_client() as api:
+            ro = await rotom_overview(api)
+
+        dev_total  = int(ro.get("devices", {}).get("total", 0) or 0)
+        dev_alive  = int(ro.get("devices", {}).get("alive", 0) or 0)
+        dev_bad    = max(0, dev_total - dev_alive)
+        dev_pct    = _safe_div(dev_alive, dev_total)
+        dev_bar    = _bar_good_bad(dev_alive, dev_bad, length=18)
+
+        w = ro.get("workers", {}) or {}
+        wrk_total  = int(w.get("total", 0) or 0)
+        wrk_active = int(w.get("active", 0) or 0)
+        wrk_bad    = max(0, wrk_total - wrk_active)
+        wrk_pct    = _safe_div(wrk_active, wrk_total)
+        wrk_bar    = _bar_good_bad(wrk_active, wrk_bad, length=18)
+
+        lines = [
+            f"**Devices**   `{dev_bar}`  {_fmt_pct(dev_pct)}\n(Alive **{_fmt_int(dev_alive)}** / Total **{_fmt_int(dev_total)}**)",
+            f"**Workers**   `{wrk_bar}`  {_fmt_pct(wrk_pct)}\n(Active **{_fmt_int(wrk_active)}** / Total **{_fmt_int(wrk_total)}**)",
+        ]
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("Rotom overview block failed: {!r}", e)
+        return "—"
+
 
 async def _format_accounts_sessions_block(
     window_value: int = 24,
@@ -76,8 +111,10 @@ async def _format_accounts_sessions_block(
                 if gmo >= gmo_limit:
                     lr_gmo += 1
             lr_bar = _bar_enc_gmo(lr_enc, lr_gmo, length=18)
+            enc_pct = _safe_div(lr_enc, lr_total)
+            gmo_pct = _safe_div(lr_gmo, lr_total)
             lr_block = (
-                f"**✅ ErrLimitReached**  {lr_bar}\n"
+                f"**✅ ErrLimitReached**  {lr_bar}  (Enc {_fmt_pct(enc_pct)} • GMO {_fmt_pct(gmo_pct)})\n"
                 f"🟦 Enc ≥{_fmt_int(enc_limit)}: **{_fmt_int(lr_enc)}**  •  "
                 f"🟨 GMO ≥{_fmt_int(gmo_limit)}: **{_fmt_int(lr_gmo)}**  "
                 f"(Total: **{_fmt_int(lr_total)}**)"
@@ -97,8 +134,10 @@ async def _format_accounts_sessions_block(
                 if gmo < gmo_limit:
                     ds_gmo += 1
             ds_bar = _bar_enc_gmo(ds_enc, ds_gmo, length=18)
+            enc_pct = _safe_div(ds_enc, ds_total)
+            gmo_pct = _safe_div(ds_gmo, ds_total)
             ds_block = (
-                f"**🔴 ErrDisabled**  {ds_bar}\n"
+                f"**🔴 ErrDisabled**  {ds_bar}  (Enc {_fmt_pct(enc_pct)} • GMO {_fmt_pct(gmo_pct)})\n"
                 f"🟦 Enc <{_fmt_int(enc_limit)}: **{_fmt_int(ds_enc)}**  •  "
                 f"🟨 GMO <{_fmt_int(gmo_limit)}: **{_fmt_int(ds_gmo)}**  "
                 f"(Total: **{_fmt_int(ds_total)}**)"
@@ -111,10 +150,15 @@ async def _format_accounts_sessions_block(
         logger.warning("Core overview sessions block failed: {!r}", e)
         return "—"
 
+
 async def _build_core_overview_embed() -> discord.Embed:
     async with get_dragonite_client() as api:
         stat = await status_overview(api)
         prox = await proxies_provider_summary(api)
+
+    # NEW: Rotom block (kept independent; failures won’t break the embed)
+    rotom_block = await _format_rotom_block()
+    # ---------------------------------------------
 
     areas   = stat.get("areas", {})
     modes   = stat.get("modes", {})
@@ -127,6 +171,7 @@ async def _build_core_overview_embed() -> discord.Embed:
 
     # Accounts sessions (24h)
     sessions_block = await _format_accounts_sessions_block(24, IntervalUnit.HOUR)
+
     emb = discord.Embed(
         title="Pulse • Core Overview",
         description=(
@@ -162,6 +207,14 @@ async def _build_core_overview_embed() -> discord.Embed:
         inline=False,
     )
 
+    # NEW: Rotom Status
+    emb.add_field(
+        name="⚙️ Rotom Status",
+        value=rotom_block,
+        inline=False,
+    )
+    # -----------------
+
     emb.add_field(
         name="🛰️ Providers",
         value=_fmt_providers_block(prox),
@@ -176,6 +229,7 @@ async def _build_core_overview_embed() -> discord.Embed:
 
     emb.set_footer(text="Auto-updates every ~60s")
     return emb
+
 
 # ---------- Updater ----------
 class CoreOverviewUpdater:

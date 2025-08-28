@@ -1,5 +1,5 @@
 import aiohttp
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from yarl import URL
 
 def _normalize_base_url(base_url: str) -> str:
@@ -81,6 +81,36 @@ class APIClient:
             # If response might be text sometimes, adjust here.
             return await r.json(content_type=None)
 
+    async def get_text(self, path: str, **params) -> str:
+        """
+        GET a plain-text endpoint (e.g. Prometheus /metrics).
+        Uses text Accept header and returns the raw body as str.
+        """
+        # start from your normal headers but override Accept for text
+        headers = dict(self._build_headers())
+        headers["Accept"] = "text/plain; charset=utf-8"
+
+        async with self.session.get(
+            self._url(path),
+            params=params or None,
+            headers=headers,
+            auth=self._basic_auth(),
+        ) as r:
+            return await r.text()
+
+    async def get_json(self, path: str, **params) -> Any:
+        """
+        GET a JSON endpoint (e.g. /api/status).
+        Uses application/json Accept header and returns the raw body as dict.
+        """
+        async with self.session.get(
+            self._url(path),
+            params=params or None,
+            headers=self._build_headers(),
+            auth=self._basic_auth(),
+        ) as r:
+            return await r.json(content_type=None)
+
     async def post(self, path: str, json: Any = None) -> Any:
         async with self.session.post(
             self._url(path),
@@ -89,6 +119,54 @@ class APIClient:
             auth=self._basic_auth(),
         ) as r:
             return await r.json(content_type=None)
+
+    async def post_json(self, path: str, json: Any = None) -> Any:
+        """
+        POST a JSON body and parse JSON response (lenient content_type).
+        """
+        async with self.session.post(
+            self._url(path),
+            json=json,
+            headers=self._build_headers(),
+            auth=self._basic_auth(),
+        ) as r:
+            return await r.json(content_type=None)
+
+    async def post_bytes(
+        self,
+        path: str,
+        data: Any = None,
+        extra_headers: Optional[Dict[str, str]] = None
+    ) -> Tuple[bytes, Dict[str, str], int]:
+        """
+        POST with no JSON semantics. Returns (body_bytes, response_headers, status).
+        - Sends NO Content-Type header (matches bare fetch()).
+        - Accept */* so binary responses are fine.
+        """
+        headers = dict(self._build_headers())
+
+        # Rotom returns application/zip
+        headers["Accept"] = "*/*"
+
+        # Ensure NO Content-Type header is present
+        headers.pop("Content-Type", None)
+
+        if extra_headers:
+            headers.update(extra_headers)
+            # Just in case the caller tried to add a Content-Type again
+            headers.pop("Content-Type", None)
+
+        async with self.session.post(
+            self._url(path),
+            data=data,                       # keep this None for bare POST
+            headers=headers,
+            auth=self._basic_auth(),
+            # <—— prevent aiohttp from auto-inserting Content-Type
+            skip_auto_headers={"Content-Type"},
+        ) as r:
+            body = await r.read()
+            return body, dict(r.headers), r.status
+
 
     async def patch(self, path: str, json: Any = None) -> Any:
         async with self.session.patch(

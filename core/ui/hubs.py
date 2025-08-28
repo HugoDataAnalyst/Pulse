@@ -130,6 +130,7 @@ def register_persistent_views(client: discord.Client, hubs: Iterable[HubView]):
 # ---------- Section-specific factories ----------
 def core_specs(
     *,
+    on_devices: ClickHandler,
     on_accounts: ClickHandler,
     on_proxies: ClickHandler,
     on_areas: ClickHandler,
@@ -138,6 +139,7 @@ def core_specs(
     admin_only: bool = True,
 ) -> list[ButtonSpec]:
     return [
+        ButtonSpec("pulse:core:devices",  "Devices",  discord.ButtonStyle.success,   on_devices,  admin_only),
         ButtonSpec("pulse:core:accounts", "Accounts", discord.ButtonStyle.primary, on_accounts, admin_only),
         ButtonSpec("pulse:core:proxies",  "Proxies",  discord.ButtonStyle.success,   on_proxies,  admin_only),
         ButtonSpec("pulse:core:areas",    "Areas",    discord.ButtonStyle.primary,   on_areas,    admin_only),

@@ -1,6 +1,9 @@
 import io
 import discord
 from loguru import logger
+from core.rotom.init import get_rotom_client
+from core.rotom.processors import public_device_ids, jobs_catalog
+from core.rotom.posts import device_action, execute_job, DeviceAction
 from core.dragonite.init import get_dragonite_client
 from core.dragonite.gets import (
     get_accounts_level_stats,
@@ -31,7 +34,7 @@ from core.dragonite.sql.dao import (
 from core.dragonite.deletes import delete_proxy
 from core.dragonite.posts import add_proxy
 from core.dragonite.processors import proxies_bad_list, status_area_map, summarize_area_info
-from core.ui.pagination import PaginatedAreaPicker
+from core.ui.pagination import PaginatedAreaPicker, PaginatedDevicePicker
 from utils.static_map import render_geofence_png
 from utils.handlers_helpers import (
     _actor,
@@ -1062,7 +1065,7 @@ class AreasMenu(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
         # Single entry: open area picker
-        self.add_item(discord.ui.Button(label="Select Area…", style=discord.ButtonStyle.primary, custom_id="pulse:areas:pick"))
+        self.add_item(discord.ui.Button(label="Select Area", style=discord.ButtonStyle.primary, custom_id="pulse:areas:pick"))
         for child in self.children:
             if isinstance(child, discord.ui.Button) and child.custom_id == "pulse:areas:pick":
                 child.callback = self._pick
@@ -1174,3 +1177,241 @@ class AreaActions(discord.ui.View):
 
 async def on_core_areas_click(inter: discord.Interaction):
     await inter.response.send_message("**Areas**", view=AreasMenu(), ephemeral=True)
+
+
+# -----------------------
+# ROTOM DEVICES
+# -----------------------
+
+class DevicesMenu(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Button(label="Actions", style=discord.ButtonStyle.primary,   custom_id="pulse:dev:actions"))
+        self.add_item(discord.ui.Button(label="Jobs",    style=discord.ButtonStyle.secondary, custom_id="pulse:dev:jobs"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                if c.custom_id.endswith(":actions"):
+                    c.callback = self._actions
+                elif c.custom_id.endswith(":jobs"):
+                    c.callback = self._jobs
+
+    async def _actions(self, inter: discord.Interaction):
+        logger.info(f"[audit] Devices.Actions click by {_actor(inter)}")
+        try:
+            async with get_rotom_client() as api:
+                ids = await public_device_ids(api)
+            if not ids:
+                return await inter.response.edit_message(content="**Devices** — no devices found.", view=None)
+            view = PaginatedDevicePicker(ids, on_pick=self._after_pick_action)
+            total_pages = max(1, (len(ids)+24)//25)
+            await inter.response.edit_message(content=f"**Devices • Pick a device** (1/{total_pages})", view=view)
+        except Exception as e:
+            logger.exception("Devices.Actions failed")
+            if inter.response.is_done():
+                await inter.followup.send(f"❌ Failed: `{e}`", ephemeral=True)
+            else:
+                await inter.response.send_message(f"❌ Failed: `{e}`", ephemeral=True)
+
+    async def _after_pick_action(self, inter: discord.Interaction, device_id: str):
+        view = DeviceActionButtons(device_id)
+        await inter.response.edit_message(content=f"**Device • {device_id}** — choose action:", view=view)
+
+    async def _jobs(self, inter: discord.Interaction):
+        logger.info(f"[audit] Devices.Jobs click by {_actor(inter)}")
+        await inter.response.edit_message(content="**Jobs**", view=JobsMenu())
+
+
+class DeviceActionButtons(discord.ui.View):
+    def __init__(self, device_id: str):
+        super().__init__(timeout=120)
+        self.device_id = device_id
+
+        actions = [
+            ("Reboot",     DeviceAction.REBOOT,     discord.ButtonStyle.primary),
+            ("Restart",    DeviceAction.RESTART,    discord.ButtonStyle.primary),
+            ("Get Logcat", DeviceAction.GET_LOGCAT, discord.ButtonStyle.secondary),
+            ("Delete",     DeviceAction.DELETE,     discord.ButtonStyle.danger),
+        ]
+
+        for label, act_enum, style in actions:
+            b = discord.ui.Button(label=label, style=style)
+
+            async def _cb(inter: discord.Interaction, act=act_enum, label=label):
+                await inter.response.defer(ephemeral=True, thinking=True)
+                try:
+                    if act is DeviceAction.GET_LOGCAT:
+                        try:
+                            await inter.followup.send("ℹ️ `getLogcat` requested — this can take a bit to collect/upload.", ephemeral=True)
+                        except Exception:
+                            pass
+
+                    async with get_rotom_client() as api:
+                        res = await device_action(api, self.device_id, act)
+
+                    if act == DeviceAction.GET_LOGCAT:
+                        file_bytes = res.get("file_bytes")
+                        filename   = res.get("filename") or f"logcat-{self.device_id}.zip"
+                        if file_bytes:
+                            import io
+                            file = discord.File(io.BytesIO(file_bytes), filename=filename)
+                            await inter.followup.send(content=f"📦 Logcat for **{self.device_id}**", file=file, ephemeral=True)
+                        else:
+                            # Show JSON error info if Rotom returned it
+                            if res.get("json"):
+                                await inter.followup.send(
+                                    f"❌ `getLogcat` failed for **{self.device_id}**: `{res['json']}`",
+                                    ephemeral=True
+                                )
+                            else:
+                                await inter.followup.send(
+                                    f"✅ `getLogcat` requested for **{self.device_id}** (no file returned).",
+                                    ephemeral=True
+                                )
+                    else:
+                        await inter.followup.send(f"✅ **{label}** sent to **{self.device_id}**.", ephemeral=True)
+
+                    logger.info(f"[audit] DeviceAction {act.value} by {_actor(inter)} on {self.device_id}")
+
+                except Exception as e:
+                    logger.exception("device_action failed")
+                    await inter.followup.send(f"❌ `{label}` failed: `{e}`", ephemeral=True)
+
+
+            b.callback = _cb
+            self.add_item(b)
+
+# -----------------------
+# ROTOM JOBS
+# -----------------------
+
+class JobsMenu(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Button(label="List Jobs", style=discord.ButtonStyle.primary,   custom_id="pulse:jobs:list"))
+        self.add_item(discord.ui.Button(label="Execute",  style=discord.ButtonStyle.success,   custom_id="pulse:jobs:exec"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                if c.custom_id.endswith(":list"):
+                    c.callback = self._list
+                elif c.custom_id.endswith(":exec"):
+                    c.callback = self._exec
+
+    async def _list(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            async with get_rotom_client() as api:
+                cats = await jobs_catalog(api)
+            if not cats:
+                return await inter.followup.send("No jobs found.", ephemeral=True)
+
+            view = JobListView(cats)
+            await inter.followup.send(content="**Jobs • Pick a job**", view=view, ephemeral=True)
+        except Exception as e:
+            logger.exception("Jobs list failed")
+            await inter.followup.send(f"❌ Failed: `{e}`", ephemeral=True)
+
+    async def _exec(self, inter: discord.Interaction):
+        await inter.response.send_modal(JobExecuteModal())
+
+
+class JobListView(discord.ui.View):
+    def __init__(self, catalog: list[dict]):
+        super().__init__(timeout=120)
+        self.catalog = sorted(catalog, key=lambda x: x["id"])
+        # Select supports up to 25 options
+        opts = [discord.SelectOption(label=j["id"], value=j["id"]) for j in self.catalog[:25]]
+        sel = discord.ui.Select(placeholder="Choose job", options=opts, min_values=1, max_values=1)
+
+        async def _pick(inter: discord.Interaction):
+            jid = sel.values[0]
+            spec = next((x for x in self.catalog if x["id"] == jid), None)
+            if not spec:
+                return await inter.response.send_message("Missing job spec.", ephemeral=True)
+
+            desc = spec.get("description") or "—"
+            exe  = spec.get("exec") or "—"
+            emb = discord.Embed(
+                title=f"Job • {jid}",
+                color=0x5865F2,
+                description=f"**Description**\n{desc}\n\n**Exec**\n`{exe}`"
+            )
+
+            btn = discord.ui.Button(label="Execute on device", style=discord.ButtonStyle.success)
+
+            async def _go(i: discord.Interaction):
+                try:
+                    async with get_rotom_client() as api:
+                        ids = await public_device_ids(api)
+                    if not ids:
+                        return await i.response.send_message("No devices available.", ephemeral=True)
+
+                    view = PaginatedDevicePicker(
+                        ids,
+                        on_pick=lambda j, dev: self._exec_on(j, dev, jid)
+                    )
+                    total_pages = max(1, (len(ids)+24)//25)
+                    await i.response.edit_message(content=f"**Execute {jid} • pick device** (1/{total_pages})", embed=None, view=view)
+                except Exception as e:
+                    logger.exception("Jobs list->pick device failed")
+                    await i.response.send_message(f"❌ Failed: `{e}`", ephemeral=True)
+
+            btn.callback = _go
+            v = discord.ui.View(timeout=120)
+            v.add_item(btn)
+            await inter.response.send_message(embed=emb, view=v, ephemeral=True)
+
+        sel.callback = _pick
+        self.add_item(sel)
+
+    async def _exec_on(self, inter: discord.Interaction, device_id: str, job_id: str):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            async with get_rotom_client() as api:
+                # ✅ Rotom expects payload with deviceId
+                await execute_job(api, job_id, payload={"deviceId": device_id})
+            await inter.followup.send(f"✅ Executed **{job_id}** on **{device_id}**.", ephemeral=True)
+            logger.info(f"[audit] JobExecute {job_id} on {device_id} by {_actor(inter)}")
+        except Exception as e:
+            logger.exception("job_execute failed")
+            await inter.followup.send(f"❌ Execute failed: `{e}`", ephemeral=True)
+
+
+class JobExecuteModal(discord.ui.Modal, title="Execute Job"):
+    job_id = discord.ui.TextInput(label="Job ID", placeholder="e.g., google_clean", required=True, max_length=128)
+
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    async def on_submit(self, inter: discord.Interaction):
+        jid = str(self.job_id).strip()
+        actor = _actor(inter)
+        logger.info(f"[audit] Jobs.Execute submit by {actor} (job={jid})")
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            async with get_rotom_client() as api:
+                ids = await public_device_ids(api)
+            if not ids:
+                return await inter.followup.send("No devices available.", ephemeral=True)
+
+            async def _after_pick(i: discord.Interaction, device_id: str):
+                await i.response.defer(ephemeral=True, thinking=True)
+                try:
+                    async with get_rotom_client() as api:
+                        # ✅ payload form
+                        await execute_job(api, jid, payload={"deviceId": device_id})
+                    await i.followup.send(f"✅ Executed **{jid}** on **{device_id}**.", ephemeral=True)
+                    logger.info(f"[audit] JobExecute {jid} on {device_id} by {actor}")
+                except Exception as e:
+                    logger.exception("job_execute failed")
+                    await i.followup.send(f"❌ Execute failed: `{e}`", ephemeral=True)
+
+            view = PaginatedDevicePicker(ids, on_pick=_after_pick)
+            total_pages = max(1, (len(ids)+24)//25)
+            await inter.followup.send(content=f"**Execute {jid} • pick device** (1/{total_pages})", view=view, ephemeral=True)
+        except Exception as e:
+            logger.exception("Jobs.Execute modal failure")
+            await inter.followup.send(f"❌ Failed: `{e}`", ephemeral=True)
+
+
+async def on_core_devices_click(inter: discord.Interaction):
+    await inter.response.send_message("**Devices Menu**", view=DevicesMenu(), ephemeral=True)
