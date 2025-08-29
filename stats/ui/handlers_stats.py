@@ -8,9 +8,19 @@ from stats.psyduckv2.processors import fetch_area_list_from_geofences
 from core.ui.pagination import PaginatedAreaPicker
 
 from stats.psyduckv2.gets import (
+    # Pokemon
     get_pokemon_counterseries,
     get_pokemon_timeseries,
     get_pokemon_tth_timeseries,
+    # Quests
+    get_quest_counterseries,
+    get_quest_timeseries,
+    # Raids
+    get_raids_counterseries,
+    get_raid_timeseries,
+    # Invasions
+    get_invasions_counterseries,
+    get_invasion_timeseries,
 )
 
 # -----------------------
@@ -566,15 +576,564 @@ class TimeSeriesTTHModal(discord.ui.Modal, title="TimeSeries • TTH"):
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
 
-# -----------------------
-# TODO: Quests / Raids / Invasions
-# -----------------------
+# =========================================================
+# ================  Quests / Raids / Invasions  ===========
+# =========================================================
+
+# ---------- tiny helpers reused here ----------
+def _valid_hw_interval(v: str) -> bool:
+    """hourly or weekly"""
+    return (v or "").lower() in ("hourly", "weekly")
+
+def _validate_mode(mode: str, interval: str) -> bool:
+    m = (mode or "").lower()
+    if m == "surged":
+        return (interval or "").lower() == "hourly"
+    return m in ("sum", "grouped")
+
+
+# ---------- Generic area scope (reused) ----------
+class AreaScopeViewGeneric(discord.ui.View):
+    """
+    Generic Global vs Per-Area picker that receives two callables:
+      on_global(inter), on_area(inter, area_name)
+    """
+    def __init__(self, on_global, on_area):
+        super().__init__(timeout=120)
+        self._on_global = on_global
+        self._on_area = on_area
+        self.add_item(discord.ui.Button(label="Global",   style=discord.ButtonStyle.success, custom_id="pulse:scope2:global"))
+        self.add_item(discord.ui.Button(label="Per Area", style=discord.ButtonStyle.primary, custom_id="pulse:scope2:area"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                if c.custom_id.endswith(":global"):
+                    c.callback = self._global
+                elif c.custom_id.endswith(":area"):
+                    c.callback = self._area
+
+    async def _global(self, inter: discord.Interaction):
+        try:
+            await self._on_global(inter)
+        except Exception:
+            logger.exception("AreaScopeViewGeneric: global flow failed")
+            await inter.response.send_message("❌ Failed to open modal.", ephemeral=True)
+
+    async def _area(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            areas = await fetch_area_list_from_geofences()
+            if not areas:
+                return await inter.followup.send("❌ No geofences available.", ephemeral=True)
+        except Exception as e:
+            logger.exception("Geofences fetch failed")
+            return await inter.followup.send(f"❌ Failed to load areas: `{e}`", ephemeral=True)
+
+        async def _on_pick(i: discord.Interaction, area: dict):
+            name = area.get("name") or None
+            try:
+                await self._on_area(i, name)
+            except Exception:
+                logger.exception("AreaScopeViewGeneric: per-area flow failed")
+                await i.response.send_message("❌ Failed to open modal.", ephemeral=True)
+
+        view = PaginatedAreaPicker(areas, on_pick=_on_pick, page=0, page_size=25)
+        total_pages = max(1, (len(areas) + 24) // 25)
+        await inter.followup.send(content=f"**Choose Area** (1/{total_pages})", view=view, ephemeral=True)
+
+# ===== Step-2 launchers (press button → open Step 2 modal) =====
+
+class QuestsCountersStep2LauncherView(discord.ui.View):
+    def __init__(self, *, area: str | None, st: str, en: str):
+        super().__init__(timeout=180)
+        self.area, self.st, self.en = area, st, en
+        self.add_item(discord.ui.Button(label="Continue", style=discord.ButtonStyle.primary, custom_id="pulse:quests:counters:continue"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                c.callback = self._open_step2
+
+    async def _open_step2(self, inter: discord.Interaction):
+        await inter.response.send_modal(QuestsCountersStep2Modal(area=self.area, st=self.st, en=self.en))
+
+
+class RaidsCountersStep2LauncherView(discord.ui.View):
+    def __init__(self, *, area: str | None, st: str, en: str):
+        super().__init__(timeout=180)
+        self.area, self.st, self.en = area, st, en
+        self.add_item(discord.ui.Button(label="Continue", style=discord.ButtonStyle.primary, custom_id="pulse:raids:counters:continue"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                c.callback = self._open_step2
+
+    async def _open_step2(self, inter: discord.Interaction):
+        await inter.response.send_modal(RaidsCountersStep2Modal(area=self.area, st=self.st, en=self.en))
+
+
+class InvasionsCountersStep2LauncherView(discord.ui.View):
+    def __init__(self, *, area: str | None, st: str, en: str):
+        super().__init__(timeout=180)
+        self.area, self.st, self.en = area, st, en
+        self.add_item(discord.ui.Button(label="Continue", style=discord.ButtonStyle.primary, custom_id="pulse:invasions:counters:continue"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                c.callback = self._open_step2
+
+    async def _open_step2(self, inter: discord.Interaction):
+        await inter.response.send_modal(InvasionsCountersStep2Modal(area=self.area, st=self.st, en=self.en))
+
+
+# =========================================================
+# ========================  QUESTS  =======================
+# =========================================================
 
 async def on_quests_click(inter: discord.Interaction):
-    await inter.response.send_message("Stats → **Quests** (coming soon)", ephemeral=True)
+    await inter.response.send_message("**Quests**", view=QuestsRootMenu(), ephemeral=True)
+
+class QuestsRootMenu(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Button(label="Counters",   style=discord.ButtonStyle.primary,   custom_id="pulse:quests:counters"))
+        self.add_item(discord.ui.Button(label="TimeSeries", style=discord.ButtonStyle.secondary, custom_id="pulse:quests:timeseries"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                if c.custom_id.endswith(":counters"):
+                    c.callback = self._counters
+                elif c.custom_id.endswith(":timeseries"):
+                    c.callback = self._timeseries
+
+    async def _counters(self, inter: discord.Interaction):
+        async def on_global(i: discord.Interaction):
+            await i.response.send_modal(QuestsCountersStep1Modal(area=None))
+        async def on_area(i: discord.Interaction, area_name: str | None):
+            await i.response.send_modal(QuestsCountersStep1Modal(area=area_name))
+        await inter.response.edit_message(content="**Quests • Counters** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
+
+    async def _timeseries(self, inter: discord.Interaction):
+        async def on_global(i: discord.Interaction):
+            await i.response.send_modal(QuestsTimeSeriesModal(area=None))
+        async def on_area(i: discord.Interaction, area_name: str | None):
+            await i.response.send_modal(QuestsTimeSeriesModal(area=area_name))
+        await inter.response.edit_message(content="**Quests • TimeSeries** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
+
+
+# --- Quests Counters (Step1 -> Step2) ---
+class QuestsCountersStep1Modal(discord.ui.Modal, title="Quests • Counters • Step 1"):
+    counter_type = discord.ui.TextInput(label="Counter Type", placeholder="totals", required=False, max_length=16)
+    start = discord.ui.TextInput(label="Start (ISO or relative)", placeholder="2023-03-05T00:00:00 or 1 month", required=True, max_length=64)
+    end   = discord.ui.TextInput(label="End (ISO or relative)",   placeholder="now or 2023-03-15T23:59:59",         required=True, max_length=64)
+    def __init__(self, area: str | None):
+        super().__init__(timeout=180)
+        self.area = area
+        self.counter_type.default = "totals"
+        self.end.default = "now"
+    async def on_submit(self, inter: discord.Interaction):
+        ct = (self.counter_type.value or "totals").strip().lower()
+        st = self.start.value.strip()
+        en = self.end.value.strip()
+        if ct != "totals":
+            return await inter.response.send_message("❌ Only 'totals' is supported for Quests counters.", ephemeral=True)
+
+        view = QuestsCountersStep2LauncherView(area=self.area, st=st, en=en)
+        await inter.response.send_message(
+            content="**Quests • Counters** — press **Continue** to set filters.",
+            view=view,
+            ephemeral=True,
+        )
+
+class QuestsCountersStep2Modal(discord.ui.Modal, title="Quests • Counters • Filters"):
+    interval = discord.ui.TextInput(label="Interval", placeholder="hourly or weekly", required=True,  max_length=16)
+    mode     = discord.ui.TextInput(label="Mode",     placeholder="sum/grouped (surged only if hourly)", required=True,  max_length=32)
+    with_ar  = discord.ui.TextInput(label="with_ar",  placeholder="all / true / false", required=False, max_length=8)
+    ar_type  = discord.ui.TextInput(label="ar_type",  placeholder="all or AR quest type", required=False, max_length=32)
+    normal_type = discord.ui.TextInput(label="normal_type", placeholder="all or normal quest type", required=False, max_length=32)
+
+    def __init__(self, area: str | None, st: str, en: str):
+        super().__init__(timeout=180)
+        self._area, self._st, self._en = area, st, en
+        self.interval.default = "hourly"
+        self.mode.default = "sum"
+        self.with_ar.default = "all"
+        self.ar_type.default = "all"
+        self.normal_type.default = "all"
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        iv   = self.interval.value.strip().lower()
+        mode = self.mode.value.strip().lower()
+        with_ar = (self.with_ar.value or "all").strip().lower()
+        ar_type = (self.ar_type.value or "all").strip()
+        normal_type = (self.normal_type.value or "all").strip()
+
+        if not _valid_hw_interval(iv):
+            return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
+        if not _validate_mode(mode, iv):
+            return await inter.followup.send("❌ Mode must be sum/grouped (surged only if hourly).", ephemeral=True)
+        if with_ar not in ("all", "true", "false"):
+            return await inter.followup.send("❌ with_ar must be all / true / false.", ephemeral=True)
+
+        try:
+            async with get_psyduck_client() as api:
+                res = await get_quest_counterseries(
+                    api,
+                    counter_type="totals",
+                    interval=iv,
+                    start_time=self._st,
+                    end_time=self._en,
+                    mode=mode,
+                    area=self._area,
+                    with_ar=with_ar,
+                    ar_type=ar_type,
+                    normal_type=normal_type,
+                    # remaining reward_* and *_id/amount default to "all"
+                    # Need to add third launchview..
+                )
+            title = f"Quests • Counters • {iv} • { _fmt_area_for_title(self._area) }"
+            await _send_json(inter, res, title)
+        except Exception as e:
+            logger.exception("get_quests_counterseries failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
+
+# --- Quests TimeSeries (single modal) ---
+class QuestsTimeSeriesModal(discord.ui.Modal, title="Quests • TimeSeries"):
+    start = discord.ui.TextInput(label="Start (ISO or relative)", placeholder="2023-03-05T00:00:00 or 1 month", required=True, max_length=64)
+    end   = discord.ui.TextInput(label="End (ISO or relative)",   placeholder="now or 2023-03-15T23:59:59",         required=True, max_length=64)
+    mode  = discord.ui.TextInput(label="Mode",                     placeholder="sum/grouped/surged",                 required=True, max_length=24)
+    quest_mode = discord.ui.TextInput(label="quest_mode",          placeholder="all / AR / NORMAL",                  required=False, max_length=10)
+    quest_type = discord.ui.TextInput(label="quest_type",          placeholder="all or Type ID",                     required=False, max_length=16)
+
+    def __init__(self, area: str | None):
+        super().__init__(timeout=180)
+        self._area = area
+        self.end.default = "now"
+        self.mode.default = "sum"
+        self.quest_mode.default = "all"
+        self.quest_type.default = "all"
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        st = self.start.value.strip()
+        en = self.end.value.strip()
+        mode = self.mode.value.strip().lower()
+        qmode = (self.quest_mode.value or "all").strip().upper()
+        qtype = (self.quest_type.value or "all").strip()
+
+        if mode not in ("sum", "grouped", "surged"):
+            return await inter.followup.send("❌ Mode must be sum/grouped/surged.", ephemeral=True)
+        if qmode not in ("ALL", "AR", "NORMAL"):
+            return await inter.followup.send("❌ quest_mode must be all / AR / NORMAL.", ephemeral=True)
+
+        try:
+            async with get_psyduck_client() as api:
+                res = await get_quest_timeseries(
+                    api,
+                    start_time=st,
+                    end_time=en,
+                    mode=mode,
+                    area=self._area,
+                    quest_mode=qmode if qmode != "ALL" else "all",
+                    quest_type=qtype,
+                )
+            title = f"Quests • TimeSeries • { _fmt_area_for_title(self._area) }"
+            await _send_json(inter, res, title)
+        except Exception as e:
+            logger.exception("get_quests_timeseries failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
+
+
+# =========================================================
+# =========================  RAIDS  =======================
+# =========================================================
 
 async def on_raids_click(inter: discord.Interaction):
-    await inter.response.send_message("Stats → **Raids** (coming soon)", ephemeral=True)
+    await inter.response.send_message("**Raids**", view=RaidsRootMenu(), ephemeral=True)
+
+class RaidsRootMenu(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Button(label="Counters",   style=discord.ButtonStyle.primary,   custom_id="pulse:raids:counters"))
+        self.add_item(discord.ui.Button(label="TimeSeries", style=discord.ButtonStyle.secondary, custom_id="pulse:raids:timeseries"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                if c.custom_id.endswith(":counters"):
+                    c.callback = self._counters
+                elif c.custom_id.endswith(":timeseries"):
+                    c.callback = self._timeseries
+
+    async def _counters(self, inter: discord.Interaction):
+        async def on_global(i): await i.response.send_modal(RaidsCountersStep1Modal(area=None))
+        async def on_area(i, area_name): await i.response.send_modal(RaidsCountersStep1Modal(area=area_name))
+        await inter.response.edit_message(content="**Raids • Counters** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
+
+    async def _timeseries(self, inter: discord.Interaction):
+        async def on_global(i): await i.response.send_modal(RaidsTimeSeriesModal(area=None))
+        async def on_area(i, area_name): await i.response.send_modal(RaidsTimeSeriesModal(area=area_name))
+        await inter.response.edit_message(content="**Raids • TimeSeries** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
+
+# --- Raids Counters ---
+class RaidsCountersStep1Modal(discord.ui.Modal, title="Raids • Counters • Step 1"):
+    counter_type = discord.ui.TextInput(label="Counter Type", placeholder="totals", required=False, max_length=16)
+    start = discord.ui.TextInput(label="Start (ISO or relative)", placeholder="2023-03-05T00:00:00 or 1 month", required=True, max_length=64)
+    end   = discord.ui.TextInput(label="End (ISO or relative)",   placeholder="now or 2023-03-15T23:59:59",         required=True, max_length=64)
+    def __init__(self, area: str | None):
+        super().__init__(timeout=180)
+        self.area = area
+        self.counter_type.default = "totals"
+        self.end.default = "now"
+    async def on_submit(self, inter: discord.Interaction):
+        ct = (self.counter_type.value or "totals").strip().lower()
+        if ct != "totals":
+            return await inter.response.send_message("❌ Only 'totals' is supported for Raids counters.", ephemeral=True)
+
+        st = self.start.value.strip()
+        en = self.end.value.strip()
+        view = RaidsCountersStep2LauncherView(area=self.area, st=st, en=en)
+        await inter.response.send_message(
+            content="**Raids • Counters** — press **Continue** to set filters.",
+            view=view,
+            ephemeral=True,
+        )
+class RaidsCountersStep2Modal(discord.ui.Modal, title="Raids • Counters • Filters"):
+    interval     = discord.ui.TextInput(label="Interval",     placeholder="hourly or weekly", required=True,  max_length=16)
+    mode         = discord.ui.TextInput(label="Mode",         placeholder="sum/grouped (surged only if hourly)", required=True, max_length=32)
+    raid_pokemon = discord.ui.TextInput(label="raid_pokemon", placeholder="all or Pokémon ID", required=False, max_length=16)
+    raid_form    = discord.ui.TextInput(label="raid_form",    placeholder="all or Form ID",    required=False, max_length=16)
+    raid_level   = discord.ui.TextInput(label="raid_level",   placeholder="all or Raid Level", required=False, max_length=16)
+
+    def __init__(self, area: str | None, st: str, en: str):
+        super().__init__(timeout=180)
+        self._area, self._st, self._en = area, st, en
+        self.interval.default = "hourly"
+        self.mode.default = "sum"
+        self.raid_pokemon.default = "all"
+        self.raid_form.default = "all"
+        self.raid_level.default = "all"
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        iv   = self.interval.value.strip().lower()
+        mode = self.mode.value.strip().lower()
+        rp   = (self.raid_pokemon.value or "all").strip()
+        rf   = (self.raid_form.value or "all").strip()
+        rl   = (self.raid_level.value or "all").strip()
+
+        if not _valid_hw_interval(iv):
+            return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
+        if not _validate_mode(mode, iv):
+            return await inter.followup.send("❌ Mode must be sum/grouped (surged only if hourly).", ephemeral=True)
+
+        try:
+            async with get_psyduck_client() as api:
+                res = await get_raids_counterseries(
+                    api,
+                    counter_type="totals",
+                    interval=iv,
+                    start_time=self._st,
+                    end_time=self._en,
+                    mode=mode,
+                    area=self._area,
+                    raid_pokemon=rp,
+                    raid_form=rf,
+                    raid_level=rl,
+                    # raid_costume / is_exclusive / ex_eligible left as "all"
+                )
+            title = f"Raids • Counters • {iv} • { _fmt_area_for_title(self._area) }"
+            await _send_json(inter, res, title)
+        except Exception as e:
+            logger.exception("get_raids_counterseries failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
+
+# --- Raids TimeSeries (single modal; keep ≤5 inputs) ---
+class RaidsTimeSeriesModal(discord.ui.Modal, title="Raids • TimeSeries"):
+    start = discord.ui.TextInput(label="Start (ISO or relative)", placeholder="2023-03-05T00:00:00 or 1 month", required=True, max_length=64)
+    end   = discord.ui.TextInput(label="End (ISO or relative)",   placeholder="now or 2023-03-15T23:59:59",         required=True, max_length=64)
+    mode  = discord.ui.TextInput(label="Mode",                     placeholder="sum/grouped/surged",                 required=True, max_length=24)
+    raid_pokemon = discord.ui.TextInput(label="raid_pokemon",      placeholder="all or Pokémon ID",                  required=False, max_length=16)
+    raid_level   = discord.ui.TextInput(label="raid_level",        placeholder="all or Raid Level",                  required=False, max_length=16)
+    # (raid_form defaults to 'all' to stay within modal limit)
+
+    def __init__(self, area: str | None):
+        super().__init__(timeout=180)
+        self._area = area
+        self.end.default = "now"
+        self.mode.default = "sum"
+        self.raid_pokemon.default = "all"
+        self.raid_level.default = "all"
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        st = self.start.value.strip()
+        en = self.end.value.strip()
+        mode = self.mode.value.strip().lower()
+        rp = (self.raid_pokemon.value or "all").strip()
+        rl = (self.raid_level.value or "all").strip()
+
+        if mode not in ("sum", "grouped", "surged"):
+            return await inter.followup.send("❌ Mode must be sum/grouped/surged.", ephemeral=True)
+
+        try:
+            async with get_psyduck_client() as api:
+                res = await get_raid_timeseries(
+                    api,
+                    start_time=st,
+                    end_time=en,
+                    mode=mode,
+                    area=self._area,
+                    raid_pokemon=rp,
+                    raid_form="all",
+                    raid_level=rl,
+                )
+            title = f"Raids • TimeSeries • { _fmt_area_for_title(self._area) }"
+            await _send_json(inter, res, title)
+        except Exception as e:
+            logger.exception("get_raids_timeseries failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
+
+
+# =========================================================
+# =======================  INVASIONS  =====================
+# =========================================================
 
 async def on_invasions_click(inter: discord.Interaction):
-    await inter.response.send_message("Stats → **Invasions** (coming soon)", ephemeral=True)
+    await inter.response.send_message("**Invasions**", view=InvasionsRootMenu(), ephemeral=True)
+
+class InvasionsRootMenu(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Button(label="Counters",   style=discord.ButtonStyle.primary,   custom_id="pulse:invasions:counters"))
+        self.add_item(discord.ui.Button(label="TimeSeries", style=discord.ButtonStyle.secondary, custom_id="pulse:invasions:timeseries"))
+        for c in self.children:
+            if isinstance(c, discord.ui.Button):
+                if c.custom_id.endswith(":counters"):
+                    c.callback = self._counters
+                elif c.custom_id.endswith(":timeseries"):
+                    c.callback = self._timeseries
+
+    async def _counters(self, inter: discord.Interaction):
+        async def on_global(i): await i.response.send_modal(InvasionsCountersStep1Modal(area=None))
+        async def on_area(i, area_name): await i.response.send_modal(InvasionsCountersStep1Modal(area=area_name))
+        await inter.response.edit_message(content="**Invasions • Counters** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
+
+    async def _timeseries(self, inter: discord.Interaction):
+        async def on_global(i): await i.response.send_modal(InvasionsTimeSeriesModal(area=None))
+        async def on_area(i, area_name): await i.response.send_modal(InvasionsTimeSeriesModal(area=area_name))
+        await inter.response.edit_message(content="**Invasions • TimeSeries** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
+
+# --- Invasions Counters ---
+class InvasionsCountersStep1Modal(discord.ui.Modal, title="Invasions • Counters • Step 1"):
+    counter_type = discord.ui.TextInput(label="Counter Type", placeholder="totals", required=False, max_length=16)
+    start = discord.ui.TextInput(label="Start (ISO or relative)", placeholder="2023-03-05T00:00:00 or 1 month", required=True, max_length=64)
+    end   = discord.ui.TextInput(label="End (ISO or relative)",   placeholder="now or 2023-03-15T23:59:59",         required=True, max_length=64)
+    def __init__(self, area: str | None):
+        super().__init__(timeout=180)
+        self.area = area
+        self.counter_type.default = "totals"
+        self.end.default = "now"
+    async def on_submit(self, inter: discord.Interaction):
+        ct = (self.counter_type.value or "totals").strip().lower()
+        if ct != "totals":
+            return await inter.response.send_message("❌ Only 'totals' is supported for Invasions counters.", ephemeral=True)
+
+        st = self.start.value.strip()
+        en = self.end.value.strip()
+        view = InvasionsCountersStep2LauncherView(area=self.area, st=st, en=en)
+        await inter.response.send_message(
+            content="**Invasions • Counters** — press **Continue** to set filters.",
+            view=view,
+            ephemeral=True,
+        )
+
+class InvasionsCountersStep2Modal(discord.ui.Modal, title="Invasions • Counters • Filters"):
+    interval    = discord.ui.TextInput(label="Interval",     placeholder="hourly or weekly", required=True,  max_length=16)
+    mode        = discord.ui.TextInput(label="Mode",         placeholder="sum/grouped (surged only if hourly)", required=True,  max_length=32)
+    display_type= discord.ui.TextInput(label="display_type", placeholder="all or display type", required=False, max_length=24)
+    character   = discord.ui.TextInput(label="character",    placeholder="all or character",    required=False, max_length=24)
+    grunt       = discord.ui.TextInput(label="grunt",        placeholder="all or grunt type",   required=False, max_length=24)
+    # 'confirmed' exists too but we'd exceed 5 inputs; we leave it as "all"
+
+    def __init__(self, area: str | None, st: str, en: str):
+        super().__init__(timeout=180)
+        self._area, self._st, self._en = area, st, en
+        self.interval.default = "hourly"
+        self.mode.default = "sum"
+        self.display_type.default = "all"
+        self.character.default = "all"
+        self.grunt.default = "all"
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        iv   = self.interval.value.strip().lower()
+        mode = self.mode.value.strip().lower()
+        disp = (self.display_type.value or "all").strip()
+        char = (self.character.value or "all").strip()
+        grunt = (self.grunt.value or "all").strip()
+
+        if not _valid_hw_interval(iv):
+            return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
+        if not _validate_mode(mode, iv):
+            return await inter.followup.send("❌ Mode must be sum/grouped (surged only if hourly).", ephemeral=True)
+
+        try:
+            async with get_psyduck_client() as api:
+                res = await get_invasions_counterseries(
+                    api,
+                    counter_type="totals",
+                    interval=iv,
+                    start_time=self._st,
+                    end_time=self._en,
+                    mode=mode,
+                    area=self._area,
+                    display_type=disp,
+                    character=char,
+                    grunt=grunt,
+                    confirmed="all",
+                )
+            title = f"Invasions • Counters • {iv} • { _fmt_area_for_title(self._area) }"
+            await _send_json(inter, res, title)
+        except Exception as e:
+            logger.exception("get_invasions_counterseries failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
+
+# --- Invasions TimeSeries (single modal; ≤5 inputs) ---
+class InvasionsTimeSeriesModal(discord.ui.Modal, title="Invasions • TimeSeries"):
+    start = discord.ui.TextInput(label="Start (ISO or relative)", placeholder="2023-03-05T00:00:00 or 1 month", required=True, max_length=64)
+    end   = discord.ui.TextInput(label="End (ISO or relative)",   placeholder="now or 2023-03-15T23:59:59",         required=True, max_length=64)
+    mode  = discord.ui.TextInput(label="Mode",                     placeholder="sum/grouped/surged",                 required=True, max_length=24)
+    display = discord.ui.TextInput(label="display",                placeholder="all or Invasion Display ID",         required=False, max_length=16)
+    grunt   = discord.ui.TextInput(label="grunt",                  placeholder="all or Grunt ID",                    required=False, max_length=16)
+    # 'confirmed' left as 'all' to keep within 5
+
+    def __init__(self, area: str | None):
+        super().__init__(timeout=180)
+        self._area = area
+        self.end.default = "now"
+        self.mode.default = "sum"
+        self.display.default = "all"
+        self.grunt.default = "all"
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True, thinking=True)
+        st = self.start.value.strip()
+        en = self.end.value.strip()
+        mode = self.mode.value.strip().lower()
+        disp = (self.display.value or "all").strip()
+        gr   = (self.grunt.value or "all").strip()
+
+        if mode not in ("sum", "grouped", "surged"):
+            return await inter.followup.send("❌ Mode must be sum/grouped/surged.", ephemeral=True)
+
+        try:
+            async with get_psyduck_client() as api:
+                res = await get_invasion_timeseries(
+                    api,
+                    start_time=st,
+                    end_time=en,
+                    mode=mode,
+                    area=self._area,
+                    display=disp,
+                    grunt=gr,
+                    confirmed="all",
+                )
+            title = f"Invasions • TimeSeries • { _fmt_area_for_title(self._area) }"
+            await _send_json(inter, res, title)
+        except Exception as e:
+            logger.exception("get_invasions_timeseries failed")
+            await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
