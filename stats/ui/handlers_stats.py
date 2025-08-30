@@ -28,6 +28,14 @@ from stats.ui.pokemon_visuals import (
     send_pokemon_timeseries_chart,
     send_pokemon_tth_timeseries_chart,
 )
+from stats.ui.raids_visuals import (
+    send_raid_counterseries_chart,
+    send_raid_timeseries_chart,
+)
+from stats.ui.invasions_visuals import (
+    send_invasion_counterseries_chart,
+    send_invasion_timeseries_chart,
+)
 # -----------------------
 # Helpers
 # -----------------------
@@ -1026,7 +1034,15 @@ class RaidsCountersStep2Modal(discord.ui.Modal, title="Raids • Counters • Fi
                 )
             logger.info(f"[audit] Stats.Raids.Counters success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Raids • Counters • {iv} • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_raid_counterseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval=iv,
+                mode=mode,
+                title_prefix=title
+            )
         except Exception as e:
             logger.exception(f"[audit] Stats.Raids.Counters error for {_actor(inter)}: {e}")
             logger.exception("get_raids_counterseries failed")
@@ -1075,7 +1091,14 @@ class RaidsTimeSeriesModal(discord.ui.Modal, title="Raids • TimeSeries"):
                 )
             logger.info(f"[audit] Stats.Raids.TimeSeries success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Raids • TimeSeries • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            await send_raid_timeseries_chart(
+                inter,
+                res,
+                area=self._area,
+                mode=mode,
+                title_prefix=title
+            )
+            #await _send_json(inter, res, title)
         except Exception as e:
             logger.exception(f"[audit] Stats.Raids.TimeSeries error for {_actor(inter)}: {e}")
             logger.exception("get_raids_timeseries failed")
@@ -1188,7 +1211,15 @@ class InvasionsCountersStep2Modal(discord.ui.Modal, title="Invasions • Counter
                 )
             logger.info(f"[audit] Stats.Invasions.Counters success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Invasions • Counters • {iv} • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_invasion_counterseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval=iv,
+                mode=mode,
+                title_prefix=title
+            )
         except Exception as e:
             logger.exception(f"[audit] Stats.Invasions.Counters error for {_actor(inter)}: {e}")
             logger.exception("get_invasions_counterseries failed")
@@ -1237,7 +1268,14 @@ class InvasionsTimeSeriesModal(discord.ui.Modal, title="Invasions • TimeSeries
                 )
             logger.info(f"[audit] Stats.Invasions.TimeSeries success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Invasions • TimeSeries • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_invasion_timeseries_chart(
+                inter,
+                res,
+                area=self._area,
+                mode=mode,
+                title_prefix=title
+            )
         except Exception as e:
             logger.exception(f"[audit] Stats.Invasions.TimeSeries error for {_actor(inter)}: {e}")
             logger.exception("get_invasions_timeseries failed")
