@@ -1,260 +1,25 @@
-# stats/ui/visuals.py
 from __future__ import annotations
-import json
-import os
-import io
-from typing import Iterable, List, Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 import discord
 import matplotlib
 matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
-
-# -----------------------
-# Generic helpers
-# -----------------------
-def _fmt_compact(n: float) -> str:
-    """Compact number formatting (k, M, B) for ephem. messages."""
-    try:
-        n = float(n)
-    except Exception:
-        return str(n)
-
-    def fmt(val: float, suffix: str) -> str:
-        # one decimal, strip trailing .0
-        base = f"{val:.1f}".rstrip("0").rstrip(".")
-        return f"{base}{suffix}"
-
-    if n >= 1_000_000_000:
-        return fmt(n / 1_000_000_000, "B")
-    elif n >= 1_000_000:
-        return fmt(n / 1_000_000, "M")
-    elif n >= 1_000:
-        return fmt(n / 1_000, "k")
-    else:
-        return str(int(n)) if n.is_integer() else f"{n:.0f}"
-
-def _annotate_bars(ax, bars, values):
-    for rect, v in zip(bars, values):
-        try:
-            height = rect.get_height()
-            if height <= 0:
-                continue
-            ax.text(
-                rect.get_x() + rect.get_width() / 2.0,
-                height,
-                f"{_fmt_compact(v)}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                rotation=0,
-            )
-        except Exception:
-            pass
-
-def _annotate_bars_h(ax, bars, values):
-    """Annotate horizontal bars at the bar tip (to the right)."""
-    for rect, v in zip(bars, values):
-        try:
-            w = rect.get_width()
-            if w <= 0:
-                continue
-            y = rect.get_y() + rect.get_height() / 2.0
-            ax.text(
-                w, y,
-                f"  {_fmt_compact(v)}",
-                va="center",
-                ha="left",
-                fontsize=8,
-            )
-        except Exception:
-            pass
-
-def _metric_color(metric: str) -> tuple[float, float, float]:
-    m = (metric or "").lower()
-    if m == "shiny":
-        return (1.0, 0.9, 0.2)  # yellow
-    if m == "iv100":
-        return (0.2, 0.8, 0.2)
-    if m == "iv0":
-        return (0.9, 0.3, 0.3)
-    if m == "pvp_little":
-        return (0.4, 0.6, 0.9)
-    if m == "pvp_great":
-        return (0.4, 0.4, 0.9)
-    if m == "pvp_ultra":
-        return (0.3, 0.3, 0.7)
-    return (0.6, 0.6, 0.6)
-
-# cache for weather name<->id maps
-_WEATHER_REV: dict[str, str] | None = None   # "1" -> "CLEAR"
-_WEATHER_FWD: dict[str, str] | None = None   # "CLEAR" -> "1"
-
-def _load_weather_maps() -> tuple[dict[str, str], dict[str, str]]:
-    """
-    Returns (WEATHER_REV, WEATHER_FWD):
-      REV: {"1": "CLEAR", "2": "RAINY", ...}
-      FWD: {"CLEAR": "1", "RAINY": "2", ...}
-    """
-    global _WEATHER_REV, _WEATHER_FWD
-    if _WEATHER_REV is not None and _WEATHER_FWD is not None:
-        return _WEATHER_REV, _WEATHER_FWD
-
-    # same candidate list you already use for id_to_name.json
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "..", "psyduckv2", "utils", "id_to_name.json"),
-        os.path.join(os.getcwd(), "stats", "psyduckv2", "utils", "id_to_name.json"),
-        os.path.join(os.getcwd(), "id_to_name.json"),
-    ]
-    weather_rev, weather_fwd = {}, {}
-    for p in candidates:
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            w = data.get("WEATHER") or {}
-            # file is name -> id; build both directions
-            weather_fwd = {str(name): str(wid) for name, wid in w.items()}
-            weather_rev = {str(wid): str(name) for name, wid in w.items()}
-            break
-        except Exception:
-            continue
-
-    _WEATHER_REV, _WEATHER_FWD = weather_rev, weather_fwd
-    return weather_rev, weather_fwd
-
-def _weather_label(metric_key: str) -> str:
-    """Turn '1' into 'CLEAR' (falls back to the original key)."""
-    rev, _ = _load_weather_maps()
-    return rev.get(str(metric_key), str(metric_key))
-
-# cache for id->name mapping
-_ID_NAME_MAP: dict[str, str] | None = None
-_FORM_REV: dict[str, str] | None = None  # "0"->"FORM_UNSET", ...
-
-def _load_id_maps() -> tuple[dict[str, str], dict[str, str]]:
-    """
-    Loads id_to_name.json and returns:
-      pokemon_map: {"821": "Rookidee", ...}
-      form_rev:    {"0": "FORM_UNSET", ...}   # reverse map of 'form' ids to enum name
-    """
-    global _ID_NAME_MAP, _FORM_REV
-    if _ID_NAME_MAP is not None and _FORM_REV is not None:
-        return _ID_NAME_MAP, _FORM_REV
-
-    # Try a few likely locations
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "..", "psyduckv2", "utils", "id_to_name.json"),
-        os.path.join(os.getcwd(), "stats", "psyduckv2", "utils", "id_to_name.json"),
-        os.path.join(os.getcwd(), "id_to_name.json"),
-    ]
-    data = None
-    for p in candidates:
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                break
-        except Exception:
-            continue
-
-    # If not found, use empty maps (labels will stay as 'pid:form')
-    pokemon_map = {}
-    form_rev = {}
-    if isinstance(data, dict):
-        pokemon_map = {str(k): str(v) for k, v in (data.get("pokemon") or {}).items()}
-        # reverse the 'form' map: enum_name -> "id"  ==>  "id" -> enum_name
-        raw_forms = data.get("form") or {}
-        form_rev = {str(v): str(k) for k, v in raw_forms.items()}
-
-    _ID_NAME_MAP, _FORM_REV = pokemon_map, form_rev
-    return pokemon_map, form_rev
-
-
-def _pidform_label(pid_form: str) -> str:
-    """
-    pid_form is like '821:0'. Convert to 'Rookidee (FORM_UNSET)' if we can.
-    """
-    try:
-        pid_s, form_s = str(pid_form).split(":", 1)
-    except ValueError:
-        return str(pid_form)
-    pmap, frev = _load_id_maps()
-    pname = pmap.get(pid_s, pid_s)
-    fenum = frev.get(form_s, form_s)
-    # Make the form a bit friendlier; keep enum if you prefer exact
-    return f"{pname} ({fenum})"
-
-def _bucket_midpoint(bucket: str) -> Optional[float]:
-    try:
-        lo, hi = str(bucket).split("_", 1)
-        return (float(lo) + float(hi)) / 2.0
-    except Exception:
-        return None
-
-def _tth_bucket_color(bucket: str) -> tuple[float, float, float]:
-    """
-    Two-section coloring:
-      0–30 min:  0=red → 30=green
-      30–60 min: 30=red → 60=green
-    """
-    mid = _bucket_midpoint(bucket)
-    if mid is None:
-        return (0.6, 0.6, 0.6)  # neutral gray
-
-    if 0 <= mid <= 30:
-        # map 0 → 0.0 and 30 → 1.0
-        t = mid / 30.0
-        return (1.0 - t, t, 0.0)
-
-    if 30 < mid <= 60:
-        # reset ramp at 30 → red
-        t = (mid - 30.0) / 30.0
-        return (1.0 - t, t, 0.0)
-
-    # fallback outside 0–60
-    return (0.3, 0.3, 0.3)
-
-
-
-def _bucket_sort_key(b: str) -> tuple:
-    # Sort "10_15" by numeric lower bound; fall back to string
-    try:
-        lo = int(str(b).split("_", 1)[0])
-        return (0, lo, str(b))
-    except Exception:
-        return (1, 0, str(b))
-
-
-def _save_current_fig_to_bytes(dpi: int = 160) -> bytes:
-    buf = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
-
-async def _send_image(
-    inter: discord.Interaction,
-    img_bytes: bytes,
-    title: str,
-    *,
-    ephemeral: bool = True,
-    filename_slug: str = "chart",
-):
-    file = discord.File(io.BytesIO(img_bytes), filename=f"{filename_slug}.png")
-    emb = discord.Embed(title=title, color=0x2f3136)
-    emb.set_image(url=f"attachment://{filename_slug}.png")
-    if inter.response.is_done():
-        await inter.followup.send(embed=emb, file=file, ephemeral=ephemeral)
-    else:
-        await inter.response.send_message(embed=emb, file=file, ephemeral=ephemeral)
-
-# -----------------------
-# Renderers
-# -----------------------
-
-def _format_title_suffix(area: Optional[str]) -> str:
-    return "global" if not area else area
-
+from stats.psyduckv2.utils.visual_helpers import (
+    _fmt_compact,
+    _annotate_bars,
+    _annotate_bars_h,
+    _metric_color,
+    _load_weather_maps,
+    _weather_label,
+    _format_title_suffix,
+    _pidform_label,
+    _bucket_midpoint,
+    _tth_bucket_color,
+    _bucket_sort_key,
+    _save_current_fig_to_bytes,
+    _send_image
+)
 
 # ---------- Public chart functions used by handlers ----------
 
@@ -643,40 +408,35 @@ async def send_pokemon_counterseries_chart(
             metrics = sorted(agg.keys(), key=lambda s: int(s) if str(s).isdigit() else 999)
 
             # if the handler passed a metric filter, keep numeric behavior;
-            # (your handlers already pass numbers like "1")
-            if metric is not None:
-                metric_id = str(metric)
-                # also allow name filters like "CLEAR" if you ever pass them:
-                _, wfwd = _load_weather_maps()
-                metric_id = wfwd.get(str(metric), metric_id)
-                if metric_id in agg:
-                    metrics = [metric_id]
-                else:
-                    metrics = []
-
-            # message totals with friendly names
             lines = ["**Weather totals:**"]
             for m in metrics:
                 lines.append(f"• {_weather_label(m)}: **{_fmt_compact(int(sum(agg[m].values())))}**")
             await inter.followup.send("\n".join(lines), ephemeral=True)
 
-            # stacked bars (thresholds stack within each metric) with friendly x labels
+            # --- GROUPED BARS across thresholds (instead of stacked) ---
             plt.figure(figsize=(10.5, 5.6))
             ax = plt.gca()
-            all_th = set().union(*[agg[m].keys() for m in metrics]) if metrics else set()
-            th_sorted = sorted(all_th, key=lambda s: int(s) if str(s).isdigit() else 999)
-            bottoms = [0.0] * len(metrics)
 
             x_labels = [_weather_label(m) for m in metrics]
-            for th in th_sorted:
-                vals = [agg[m].get(th, 0.0) for m in metrics]
-                bars = plt.bar(x_labels, vals, bottom=bottoms, label=th)
-                _annotate_bars(ax, bars, [b + v for b, v in zip(bottoms, vals)])
-                bottoms = [b + v for b, v in zip(bottoms, vals)]
+            x_idx = list(range(len(x_labels)))
 
-            plt.legend(title="Threshold", fontsize=8, ncols=3, loc="upper left")
+            all_th = set().union(*[agg[m].keys() for m in metrics]) if metrics else set()
+            th_sorted = sorted(all_th, key=lambda s: int(s) if str(s).isdigit() else 999)
+
+            n_series = max(1, len(th_sorted))
+            width = 0.8 / n_series
+
+            # build grouped bars: each threshold is one series
+            for i, th in enumerate(th_sorted):
+                offsets = [x - 0.4 + i * width + width / 2 for x in x_idx]
+                vals = [agg[m].get(th, 0.0) for m in metrics]
+                bars = plt.bar(offsets, vals, width=width, label=th)
+                _annotate_bars(ax, bars, vals)
+
+            plt.xticks(x_idx, x_labels, rotation=0)
             plt.ylabel("Count")
-            plt.title(f"{title} • sum (stacked by threshold)")
+            plt.title(f"{title} • sum (grouped by threshold)")
+            plt.legend(title="Threshold", fontsize=8, ncols=3, loc="upper left")
             img = _save_current_fig_to_bytes()
             return await _send_image(inter, img, f"{title} • weather_sum", filename_slug="pokemon_counters_weather_sum")
 
@@ -717,19 +477,27 @@ async def send_pokemon_counterseries_chart(
             for m in metrics:
                 plt.figure(figsize=(10.5, 5.6))
                 ax = plt.gca()
+
+                month_keys = sorted({ym for (ym, _m) in agg.keys()})
+                x_idx = list(range(len(month_keys)))
+
                 th_all = set().union(*[agg.get((ym, m), {}).keys() for ym in month_keys]) if month_keys else set()
                 th_sorted = sorted(th_all, key=lambda s: int(s) if s.isdigit() else 999)
-                bottoms = [0.0] * len(month_keys)
 
-                for th in th_sorted:
+                # --- GROUPED BARS per month (instead of stacked) ---
+                n_series = max(1, len(th_sorted))
+                width = 0.8 / n_series
+
+                for i, th in enumerate(th_sorted):
+                    offsets = [x - 0.4 + i * width + width / 2 for x in x_idx]
                     vals = [agg.get((ym, m), {}).get(th, 0.0) for ym in month_keys]
-                    bars = plt.bar(month_keys, vals, bottom=bottoms, label=th)
-                    _annotate_bars(ax, bars, [b + v for b, v in zip(bottoms, vals)])
-                    bottoms = [b + v for b, v in zip(bottoms, vals)]
+                    bars = plt.bar(offsets, vals, width=width, label=th)
+                    _annotate_bars(ax, bars, vals)
 
-                plt.legend(title="Threshold", fontsize=8, ncols=3, loc="upper left")
+                plt.xticks(x_idx, month_keys, rotation=0)
                 plt.ylabel("Count")
                 plt.title(f"{title_prefix} • weather • grouped • {_weather_label(m)} • {_format_title_suffix(area)}")
+                plt.legend(title="Threshold", fontsize=8, ncols=3, loc="upper left")
                 img = _save_current_fig_to_bytes()
                 await _send_image(
                     inter, img,
@@ -879,13 +647,13 @@ async def send_pokemon_timeseries_chart(
             plt.figure(figsize=(10.5, 6.5))
             y_pos = list(range(len(labels)))
             color = _metric_color(metric)
-            plt.barh(y_pos, values, color=color)
+            ax = plt.gca()
+            bars=plt.barh(y_pos, values, color=color)
             plt.yticks(y_pos, labels)
             plt.gca().invert_yaxis()
             plt.xlabel("Count")
             plt.title(f"{title} • grouped • {metric} (top {len(labels)})")
-            for y, v in zip(y_pos, values):
-                plt.text(v, y, f"  {int(v):,}", va="center", ha="left", fontsize=8)
+            _annotate_bars_h(ax, bars, values)
 
             img = _save_current_fig_to_bytes()
             await _send_image(

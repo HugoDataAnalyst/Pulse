@@ -23,7 +23,7 @@ from stats.psyduckv2.gets import (
 from utils.handlers_helpers import (
     _actor
 )
-from stats.ui.visuals import (
+from stats.ui.pokemon_visuals import (
     send_pokemon_counterseries_chart,
     send_pokemon_timeseries_chart,
     send_pokemon_tth_timeseries_chart,
