@@ -1016,7 +1016,15 @@
         "1014": "Okidogi",
         "1015": "Munkidori",
         "1016": "Fezandipiti",
-        "1017": "Ogerpon"
+        "1017": "Ogerpon",
+        "1018": "Archaludon",
+        "1019": "Hydrapple",
+        "1020": "Gouging Fire",
+        "1021": "Raging Bolt",
+        "1022": "Iron Boulder",
+        "1023": "Iron Crown",
+        "1024": "TeraPagos",
+        "1025": "Pecharunt"
     },
     "form": {
         "FORM_UNSET": "0",
@@ -3386,5 +3394,15 @@
         "TAUROS_PALDEA_BLAZE": "3007",
         "TAUROS_PALDEA_AQUA": "3008",
         "WOOPER_PALDEA": "3009"
+    },
+    "WEATHER": {
+        "None": "0",
+        "CLEAR": "1",
+        "RAINY": "2",
+        "PARTLY_CLOUDY": "3",
+        "OVERCAST": "4",
+        "WINDY": "5",
+        "SNOW": "6",
+        "FOG": "7"
     }
 }
