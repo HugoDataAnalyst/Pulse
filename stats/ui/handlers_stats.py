@@ -2,11 +2,9 @@ import io
 import json
 import discord
 from loguru import logger
-
 from stats.psyduckv2.init import get_psyduck_client
 from stats.psyduckv2.processors import fetch_area_list_from_geofences
 from core.ui.pagination import PaginatedAreaPicker
-
 from stats.psyduckv2.gets import (
     # Pokemon
     get_pokemon_counterseries,
@@ -22,7 +20,14 @@ from stats.psyduckv2.gets import (
     get_invasions_counterseries,
     get_invasion_timeseries,
 )
-
+from utils.handlers_helpers import (
+    _actor
+)
+from stats.ui.visuals import (
+    send_pokemon_counterseries_chart,
+    send_pokemon_timeseries_chart,
+    send_pokemon_tth_timeseries_chart,
+)
 # -----------------------
 # Helpers
 # -----------------------
@@ -86,6 +91,7 @@ def _is_int_or_all(value: str) -> bool:
 # -----------------------
 
 async def on_pokemon_click(inter: discord.Interaction):
+    logger.info(f"[audit] Stats.Pokemon.Entry click by {_actor(inter)}")
     await inter.response.send_message("**Pokémon**", view=PokemonRootMenu(), ephemeral=True)
 
 # -----------------------
@@ -106,9 +112,11 @@ class PokemonRootMenu(discord.ui.View):
                     c.callback = self._timeseries
 
     async def _counters(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.Pokemon.Counters click by {_actor(inter)}")
         await inter.response.edit_message(content="**Pokémon • Counters** — scope?", view=AreaScopeView(_after="counters"))
 
     async def _timeseries(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.Pokemon.TimeSeries click by {_actor(inter)}")
         await inter.response.edit_message(content="**Pokémon • TimeSeries** — type?", view=TimeSeriesTypeView())
 
 # -----------------------
@@ -137,6 +145,7 @@ class AreaScopeView(discord.ui.View):
                     c.callback = self._per_area
 
     async def _global(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.AreaScope.Global chosen by {_actor(inter)} for after='{self._after}'")
         if self._after == "counters":
             await inter.response.send_modal(CountersStep1Modal(area=None))
         elif self._after == "ts_totals":
@@ -147,6 +156,7 @@ class AreaScopeView(discord.ui.View):
             await inter.response.send_message("Unknown flow.", ephemeral=True)
 
     async def _per_area(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.AreaScope.PerArea start by {_actor(inter)} for after='{self._after}'")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             areas = await fetch_area_list_from_geofences()
@@ -158,6 +168,7 @@ class AreaScopeView(discord.ui.View):
 
         async def _on_pick(i: discord.Interaction, area: dict):
             name = area.get("name") or None
+            logger.info(f"[audit] Stats.AreaScope.PerArea picked '{name or 'global'}' by {_actor(i)} for after='{self._after}'")
             if self._after == "counters":
                 await i.response.send_modal(CountersStep1Modal(area=name))
             elif self._after == "ts_totals":
@@ -215,6 +226,7 @@ class CountersStep2LauncherView(discord.ui.View):
                 c.callback = self._continue
 
     async def _continue(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.Pokemon.Counters.Continue click by {_actor(inter)} ct={self.ct} st='{self.st}' en='{self.en}' area='{self.area or 'global'}'")
         if self.ct == "totals":
             await inter.response.send_modal(CountersTotalsStep2Modal(area=self.area, ct=self.ct, st=self.st, en=self.en))
         elif self.ct == "tth":
@@ -251,6 +263,7 @@ class CountersStep1Modal(discord.ui.Modal, title="Counters • Step 1"):
         ct = self.counter_type.value.strip().lower()
         st = self.start.value.strip()
         en = self.end.value.strip()
+        logger.info(f"[audit] Stats.Pokemon.Counters.Step1 submit by {_actor(inter)} ct={ct} st='{st}' en='{en}' area='{self.area or 'global'}'")
 
         if ct not in ("totals", "tth", "weather"):
             return await inter.response.send_message("❌ Type must be: totals, tth, or weather.", ephemeral=True)
@@ -262,6 +275,7 @@ class CountersStep1Modal(discord.ui.Modal, title="Counters • Step 1"):
             view=view,
             ephemeral=True,
         )
+        logger.info(f"[audit] Stats.Pokemon.Counters.ContinuePrompt shown to {_actor(inter)} ct={ct}")
 
 class CountersTotalsStep2Modal(discord.ui.Modal, title="Counters • Totals • Step 2"):
     """
@@ -304,6 +318,7 @@ class CountersTotalsStep2Modal(discord.ui.Modal, title="Counters • Totals • 
         metric = (self.metric.value.strip() or "all")
         pid = (self.pokemon_id.value.strip() or "all")
         frm = (self.form.value.strip() or "all")
+        logger.info(f"[audit] Stats.Pokemon.Counters.Totals submit by {_actor(inter)} iv={iv} mode={md} metric='{metric}' pid='{pid}' form='{frm}' area='{self._area or 'global'}'")
 
         if not _valid_counter_interval("totals", iv):
             return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
@@ -327,10 +342,19 @@ class CountersTotalsStep2Modal(discord.ui.Modal, title="Counters • Totals • 
                     form=frm or "all",
                     area=self._area,
                 )
+            logger.info(f"[audit] Stats.Pokemon.Counters.Totals success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Pokémon • Counters • totals • {iv} • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_pokemon_counterseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval=iv,
+                mode=md,
+                title_prefix="Pokémon • Counters • totals"
+            )
         except Exception as e:
-            logger.exception("get_pokemon_counterseries totals failed")
+            logger.exception(f"[audit] Stats.Pokemon.Counters.Totals error for {_actor(inter)}: {e}")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
 class CountersTTHStep2Modal(discord.ui.Modal, title="Counters • TTH • Step 2"):
@@ -363,6 +387,7 @@ class CountersTTHStep2Modal(discord.ui.Modal, title="Counters • TTH • Step 2
         iv = self.interval.value.strip().lower()
         md = self.mode.value.strip().lower()
         metric = (self.metric.value.strip() or "all")
+        logger.info(f"[audit] Stats.Pokemon.Counters.TTH submit by {_actor(inter)} iv={iv} mode={md} metric='{metric}' area='{self._area or 'global'}'")
 
         if not _valid_counter_interval("tth", iv):
             return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
@@ -381,10 +406,19 @@ class CountersTTHStep2Modal(discord.ui.Modal, title="Counters • TTH • Step 2
                     metric=metric,
                     area=self._area,
                 )
+            logger.info(f"[audit] Stats.Pokemon.Counters.TTH success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Pokémon • Counters • tth • {iv} • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_pokemon_counterseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval=iv,
+                mode=md,
+                title_prefix="Pokémon • Counters • tth"
+            )
         except Exception as e:
-            logger.exception("get_pokemon_counterseries tth failed")
+            logger.exception(f"[audit] Stats.Pokemon.Counters.TTH error for {_actor(inter)}: {e}")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
 class CountersWeatherStep2Modal(discord.ui.Modal, title="Counters • Weather • Step 2"):
@@ -412,6 +446,7 @@ class CountersWeatherStep2Modal(discord.ui.Modal, title="Counters • Weather �
         md = self.mode.value.strip().lower()
         metric = (self.metric.value.strip() or "all")
         iv = "monthly"
+        logger.info(f"[audit] Stats.Pokemon.Counters.Weather submit by {_actor(inter)} iv={iv} mode={md} metric='{metric}' area='{self._area or 'global'}'")
 
         if not _valid_counter_interval("weather", iv):
             return await inter.followup.send("❌ Internal interval error.", ephemeral=True)
@@ -430,10 +465,19 @@ class CountersWeatherStep2Modal(discord.ui.Modal, title="Counters • Weather �
                     metric=metric,
                     area=self._area,
                 )
+            logger.info(f"[audit] Stats.Pokemon.Counters.Weather success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Pokémon • Counters • weather • monthly • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_pokemon_counterseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval=iv,
+                mode=md,
+                title_prefix="Pokémon • Counters • weather"
+            )
         except Exception as e:
-            logger.exception("get_pokemon_counterseries weather failed")
+            logger.execption(f"[audit] Stats.Pokemon.Counters.Weather error for {_actor(inter)}: {e}")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
 # -----------------------
@@ -491,6 +535,7 @@ class TimeSeriesTotalsModal(discord.ui.Modal, title="TimeSeries • Totals"):
         md = self.mode.value.strip().lower()
         pid = (self.pokemon_id.value.strip() or "all")
         frm = (self.form.value.strip() or "all")
+        logger.info(f"[audit] Stats.Pokemon.TimeSeries.Totals submit by {_actor(inter)} mode={md} pid='{pid}' form='{frm}' area='{self._area or 'global'}' st='{st}' en='{en}'")
 
         if md not in ("sum", "grouped", "surged"):
             return await inter.followup.send("❌ Mode must be: sum, grouped, or surged.", ephemeral=True)
@@ -509,10 +554,18 @@ class TimeSeriesTotalsModal(discord.ui.Modal, title="TimeSeries • Totals"):
                     pokemon_id=pokemon_id if pokemon_id is not None else "all",
                     form=frm or "all",
                 )
+            logger.info(f"[audit] Stats.Pokemon.TimeSeries.Totals success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Pokémon • TimeSeries • Totals • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_pokemon_timeseries_chart(
+                inter,
+                res,
+                area=self._area,
+                mode=md,
+                title_prefix="Pokémon • TimeSeries • Totals"
+            )
         except Exception as e:
-            logger.exception("get_pokemon_timeseries (totals) failed")
+            logger.exception(f"[audit] Stats.Pokemon.TimeSeries.Totals error for {_actor(inter)}: {e}")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
 
@@ -555,6 +608,7 @@ class TimeSeriesTTHModal(discord.ui.Modal, title="TimeSeries • TTH"):
         en = self.end.value.strip()
         md = self.mode.value.strip().lower()
         bucket = (self.tth_bucket.value.strip() or "all")
+        logger.info(f"[audit] Stats.Pokemon.TimeSeries.TTH submit by {_actor(inter)} mode={md} bucket='{bucket}' area='{self._area or 'global'}' st='{st}' en='{en}'")
 
         if md not in ("sum", "grouped", "surged"):
             return await inter.followup.send("❌ Mode must be: sum, grouped, or surged.", ephemeral=True)
@@ -569,10 +623,18 @@ class TimeSeriesTTHModal(discord.ui.Modal, title="TimeSeries • TTH"):
                     area=self._area,
                     tth_bucket=bucket,
                 )
+            logger.info(f"[audit] Stats.Pokemon.TimeSeries.TTH success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Pokémon • TimeSeries • TTH • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_pokemon_tth_timeseries_chart(
+                inter,
+                res,
+                area=self._area,
+                mode=md,
+                title_prefix="Pokémon • TimeSeries • TTH"
+            )
         except Exception as e:
-            logger.exception("get_pokemon_tth_timeseries failed")
+            logger.exception(f"[audit] Stats.Pokemon.TimeSeries.TTH error for {_actor(inter)}: {e}")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
 
@@ -613,12 +675,14 @@ class AreaScopeViewGeneric(discord.ui.View):
 
     async def _global(self, inter: discord.Interaction):
         try:
+            logger.info(f"[audit] Stats.AreaScope2.Global chosen by {_actor(inter)}")
             await self._on_global(inter)
         except Exception:
             logger.exception("AreaScopeViewGeneric: global flow failed")
             await inter.response.send_message("❌ Failed to open modal.", ephemeral=True)
 
     async def _area(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.AreaScope2.PerArea start by {_actor(inter)}")
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
             areas = await fetch_area_list_from_geofences()
@@ -630,6 +694,7 @@ class AreaScopeViewGeneric(discord.ui.View):
 
         async def _on_pick(i: discord.Interaction, area: dict):
             name = area.get("name") or None
+            logger.info(f"[audit] Stats.AreaScope2.PerArea picked '{name or 'global'}' by {_actor(i)}")
             try:
                 await self._on_area(i, name)
             except Exception:
@@ -652,6 +717,7 @@ class QuestsCountersStep2LauncherView(discord.ui.View):
                 c.callback = self._open_step2
 
     async def _open_step2(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.Quests.Counters.Continue click by {_actor(inter)} st='{self.st}' en='{self.en}' area='{self.area or 'global'}'")
         await inter.response.send_modal(QuestsCountersStep2Modal(area=self.area, st=self.st, en=self.en))
 
 
@@ -665,6 +731,7 @@ class RaidsCountersStep2LauncherView(discord.ui.View):
                 c.callback = self._open_step2
 
     async def _open_step2(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.Raids.Counters.Continue click by {_actor(inter)} st='{self.st}' en='{self.en}' area='{self.area or 'global'}'")
         await inter.response.send_modal(RaidsCountersStep2Modal(area=self.area, st=self.st, en=self.en))
 
 
@@ -678,6 +745,7 @@ class InvasionsCountersStep2LauncherView(discord.ui.View):
                 c.callback = self._open_step2
 
     async def _open_step2(self, inter: discord.Interaction):
+        logger.info(f"[audit] Stats.Invasions.Counters.Continue click by {_actor(inter)} st='{self.st}' en='{self.en}' area='{self.area or 'global'}'")
         await inter.response.send_modal(InvasionsCountersStep2Modal(area=self.area, st=self.st, en=self.en))
 
 
@@ -686,6 +754,7 @@ class InvasionsCountersStep2LauncherView(discord.ui.View):
 # =========================================================
 
 async def on_quests_click(inter: discord.Interaction):
+    logger.info(f"[audit] Stats.Quests.Entry click by {_actor(inter)}")
     await inter.response.send_message("**Quests**", view=QuestsRootMenu(), ephemeral=True)
 
 class QuestsRootMenu(discord.ui.View):
@@ -705,6 +774,7 @@ class QuestsRootMenu(discord.ui.View):
             await i.response.send_modal(QuestsCountersStep1Modal(area=None))
         async def on_area(i: discord.Interaction, area_name: str | None):
             await i.response.send_modal(QuestsCountersStep1Modal(area=area_name))
+        logger.info(f"[audit] Stats.Quests.Counters click by {_actor(inter)}")
         await inter.response.edit_message(content="**Quests • Counters** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
 
     async def _timeseries(self, inter: discord.Interaction):
@@ -712,6 +782,7 @@ class QuestsRootMenu(discord.ui.View):
             await i.response.send_modal(QuestsTimeSeriesModal(area=None))
         async def on_area(i: discord.Interaction, area_name: str | None):
             await i.response.send_modal(QuestsTimeSeriesModal(area=area_name))
+        logger.info(f"[audit] Stats.Quests.TimeSeries click by {_actor(inter)}")
         await inter.response.edit_message(content="**Quests • TimeSeries** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
 
 
@@ -729,6 +800,7 @@ class QuestsCountersStep1Modal(discord.ui.Modal, title="Quests • Counters • 
         ct = (self.counter_type.value or "totals").strip().lower()
         st = self.start.value.strip()
         en = self.end.value.strip()
+        logger.info(f"[audit] Stats.Quests.Counters.Step1 submit by {_actor(inter)} ct={ct} st='{st}' en='{en}' area='{self.area or 'global'}'")
         if ct != "totals":
             return await inter.response.send_message("❌ Only 'totals' is supported for Quests counters.", ephemeral=True)
 
@@ -738,6 +810,7 @@ class QuestsCountersStep1Modal(discord.ui.Modal, title="Quests • Counters • 
             view=view,
             ephemeral=True,
         )
+        logger.info(f"[audit] Stats.Quests.Counters.ContinuePrompt shown to {_actor(inter)}")
 
 class QuestsCountersStep2Modal(discord.ui.Modal, title="Quests • Counters • Filters"):
     interval = discord.ui.TextInput(label="Interval", placeholder="hourly or weekly", required=True,  max_length=16)
@@ -762,6 +835,7 @@ class QuestsCountersStep2Modal(discord.ui.Modal, title="Quests • Counters • 
         with_ar = (self.with_ar.value or "all").strip().lower()
         ar_type = (self.ar_type.value or "all").strip()
         normal_type = (self.normal_type.value or "all").strip()
+        logger.info(f"[audit] Stats.Quests.Counters submit by {_actor(inter)} iv={iv} mode={mode} with_ar={with_ar} ar_type='{ar_type}' normal_type='{normal_type}' area='{self._area or 'global'}'")
 
         if not _valid_hw_interval(iv):
             return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
@@ -786,9 +860,11 @@ class QuestsCountersStep2Modal(discord.ui.Modal, title="Quests • Counters • 
                     # remaining reward_* and *_id/amount default to "all"
                     # Need to add third launchview..
                 )
+            logger.info(f"[audit] Stats.Quests.Counters success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Quests • Counters • {iv} • { _fmt_area_for_title(self._area) }"
             await _send_json(inter, res, title)
         except Exception as e:
+            logger.exception(f"[audit] Stats.Quests.Counters error for {_actor(inter)}: {e}")
             logger.exception("get_quests_counterseries failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
@@ -815,6 +891,7 @@ class QuestsTimeSeriesModal(discord.ui.Modal, title="Quests • TimeSeries"):
         mode = self.mode.value.strip().lower()
         qmode = (self.quest_mode.value or "all").strip().upper()
         qtype = (self.quest_type.value or "all").strip()
+        logger.info(f"[audit] Stats.Quests.TimeSeries submit by {_actor(inter)} mode={mode} quest_mode={qmode} quest_type='{qtype}' area='{self._area or 'global'}' st='{st}' en='{en}'")
 
         if mode not in ("sum", "grouped", "surged"):
             return await inter.followup.send("❌ Mode must be sum/grouped/surged.", ephemeral=True)
@@ -832,9 +909,11 @@ class QuestsTimeSeriesModal(discord.ui.Modal, title="Quests • TimeSeries"):
                     quest_mode=qmode if qmode != "ALL" else "all",
                     quest_type=qtype,
                 )
+            logger.info(f"[audit] Stats.Quests.TimeSeries success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Quests • TimeSeries • { _fmt_area_for_title(self._area) }"
             await _send_json(inter, res, title)
         except Exception as e:
+            logger.exception(f"[audit] Stats.Quests.TimeSeries error for {_actor(inter)}: {e}")
             logger.exception("get_quests_timeseries failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
@@ -844,6 +923,7 @@ class QuestsTimeSeriesModal(discord.ui.Modal, title="Quests • TimeSeries"):
 # =========================================================
 
 async def on_raids_click(inter: discord.Interaction):
+    logger.info(f"[audit] Stats.Raids.Entry click by {_actor(inter)}")
     await inter.response.send_message("**Raids**", view=RaidsRootMenu(), ephemeral=True)
 
 class RaidsRootMenu(discord.ui.View):
@@ -861,11 +941,13 @@ class RaidsRootMenu(discord.ui.View):
     async def _counters(self, inter: discord.Interaction):
         async def on_global(i): await i.response.send_modal(RaidsCountersStep1Modal(area=None))
         async def on_area(i, area_name): await i.response.send_modal(RaidsCountersStep1Modal(area=area_name))
+        logger.info(f"[audit] Stats.Raids.Counters click by {_actor(inter)}")
         await inter.response.edit_message(content="**Raids • Counters** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
 
     async def _timeseries(self, inter: discord.Interaction):
         async def on_global(i): await i.response.send_modal(RaidsTimeSeriesModal(area=None))
         async def on_area(i, area_name): await i.response.send_modal(RaidsTimeSeriesModal(area=area_name))
+        logger.info(f"[audit] Stats.Raids.TimeSeries click by {_actor(inter)}")
         await inter.response.edit_message(content="**Raids • TimeSeries** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
 
 # --- Raids Counters ---
@@ -885,12 +967,15 @@ class RaidsCountersStep1Modal(discord.ui.Modal, title="Raids • Counters • St
 
         st = self.start.value.strip()
         en = self.end.value.strip()
+        logger.info(f"[audit] Stats.Raids.Counters.Step1 submit by {_actor(inter)} ct={ct} st='{st}' en='{en}' area='{self.area or 'global'}'")
         view = RaidsCountersStep2LauncherView(area=self.area, st=st, en=en)
         await inter.response.send_message(
             content="**Raids • Counters** — press **Continue** to set filters.",
             view=view,
             ephemeral=True,
         )
+        logger.info(f"[audit] Stats.Raids.Counters.ContinuePrompt shown to {_actor(inter)}")
+
 class RaidsCountersStep2Modal(discord.ui.Modal, title="Raids • Counters • Filters"):
     interval     = discord.ui.TextInput(label="Interval",     placeholder="hourly or weekly", required=True,  max_length=16)
     mode         = discord.ui.TextInput(label="Mode",         placeholder="sum/grouped (surged only if hourly)", required=True, max_length=32)
@@ -914,6 +999,7 @@ class RaidsCountersStep2Modal(discord.ui.Modal, title="Raids • Counters • Fi
         rp   = (self.raid_pokemon.value or "all").strip()
         rf   = (self.raid_form.value or "all").strip()
         rl   = (self.raid_level.value or "all").strip()
+        logger.info(f"[audit] Stats.Raids.Counters submit by {_actor(inter)} iv={iv} mode={mode} raid_pokemon='{rp}' raid_form='{rf}' raid_level='{rl}' area='{self._area or 'global'}'")
 
         if not _valid_hw_interval(iv):
             return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
@@ -935,9 +1021,11 @@ class RaidsCountersStep2Modal(discord.ui.Modal, title="Raids • Counters • Fi
                     raid_level=rl,
                     # raid_costume / is_exclusive / ex_eligible left as "all"
                 )
+            logger.info(f"[audit] Stats.Raids.Counters success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Raids • Counters • {iv} • { _fmt_area_for_title(self._area) }"
             await _send_json(inter, res, title)
         except Exception as e:
+            logger.exception(f"[audit] Stats.Raids.Counters error for {_actor(inter)}: {e}")
             logger.exception("get_raids_counterseries failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
@@ -965,6 +1053,7 @@ class RaidsTimeSeriesModal(discord.ui.Modal, title="Raids • TimeSeries"):
         mode = self.mode.value.strip().lower()
         rp = (self.raid_pokemon.value or "all").strip()
         rl = (self.raid_level.value or "all").strip()
+        logger.info(f"[audit] Stats.Raids.TimeSeries submit by {_actor(inter)} mode={mode} raid_pokemon='{rp}' raid_level='{rl}' area='{self._area or 'global'}' st='{st}' en='{en}'")
 
         if mode not in ("sum", "grouped", "surged"):
             return await inter.followup.send("❌ Mode must be sum/grouped/surged.", ephemeral=True)
@@ -981,9 +1070,11 @@ class RaidsTimeSeriesModal(discord.ui.Modal, title="Raids • TimeSeries"):
                     raid_form="all",
                     raid_level=rl,
                 )
+            logger.info(f"[audit] Stats.Raids.TimeSeries success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Raids • TimeSeries • { _fmt_area_for_title(self._area) }"
             await _send_json(inter, res, title)
         except Exception as e:
+            logger.exception(f"[audit] Stats.Raids.TimeSeries error for {_actor(inter)}: {e}")
             logger.exception("get_raids_timeseries failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
@@ -993,6 +1084,7 @@ class RaidsTimeSeriesModal(discord.ui.Modal, title="Raids • TimeSeries"):
 # =========================================================
 
 async def on_invasions_click(inter: discord.Interaction):
+    logger.info(f"[audit] Stats.Invasions.Entry click by {_actor(inter)}")
     await inter.response.send_message("**Invasions**", view=InvasionsRootMenu(), ephemeral=True)
 
 class InvasionsRootMenu(discord.ui.View):
@@ -1010,11 +1102,13 @@ class InvasionsRootMenu(discord.ui.View):
     async def _counters(self, inter: discord.Interaction):
         async def on_global(i): await i.response.send_modal(InvasionsCountersStep1Modal(area=None))
         async def on_area(i, area_name): await i.response.send_modal(InvasionsCountersStep1Modal(area=area_name))
+        logger.info(f"[audit] Stats.Invasions.Counters click by {_actor(inter)}")
         await inter.response.edit_message(content="**Invasions • Counters** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
 
     async def _timeseries(self, inter: discord.Interaction):
         async def on_global(i): await i.response.send_modal(InvasionsTimeSeriesModal(area=None))
         async def on_area(i, area_name): await i.response.send_modal(InvasionsTimeSeriesModal(area=area_name))
+        logger.info(f"[audit] Stats.Invasions.TimeSeries click by {_actor(inter)}")
         await inter.response.edit_message(content="**Invasions • TimeSeries** — scope?", view=AreaScopeViewGeneric(on_global, on_area))
 
 # --- Invasions Counters ---
@@ -1034,12 +1128,14 @@ class InvasionsCountersStep1Modal(discord.ui.Modal, title="Invasions • Counter
 
         st = self.start.value.strip()
         en = self.end.value.strip()
+        logger.info(f"[audit] Stats.Invasions.Counters.Step1 submit by {_actor(inter)} ct={ct} st='{st}' en='{en}' area='{self.area or 'global'}'")
         view = InvasionsCountersStep2LauncherView(area=self.area, st=st, en=en)
         await inter.response.send_message(
             content="**Invasions • Counters** — press **Continue** to set filters.",
             view=view,
             ephemeral=True,
         )
+        logger.info(f"[audit] Stats.Invasions.Counters.ContinuePrompt shown to {_actor(inter)}")
 
 class InvasionsCountersStep2Modal(discord.ui.Modal, title="Invasions • Counters • Filters"):
     interval    = discord.ui.TextInput(label="Interval",     placeholder="hourly or weekly", required=True,  max_length=16)
@@ -1065,6 +1161,7 @@ class InvasionsCountersStep2Modal(discord.ui.Modal, title="Invasions • Counter
         disp = (self.display_type.value or "all").strip()
         char = (self.character.value or "all").strip()
         grunt = (self.grunt.value or "all").strip()
+        logger.info(f"[audit] Stats.Invasions.Counters submit by {_actor(inter)} iv={iv} mode={mode} display_type='{disp}' character='{char}' grunt='{grunt}' area='{self._area or 'global'}'")
 
         if not _valid_hw_interval(iv):
             return await inter.followup.send("❌ Interval must be hourly or weekly.", ephemeral=True)
@@ -1086,9 +1183,11 @@ class InvasionsCountersStep2Modal(discord.ui.Modal, title="Invasions • Counter
                     grunt=grunt,
                     confirmed="all",
                 )
+            logger.info(f"[audit] Stats.Invasions.Counters success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Invasions • Counters • {iv} • { _fmt_area_for_title(self._area) }"
             await _send_json(inter, res, title)
         except Exception as e:
+            logger.exception(f"[audit] Stats.Invasions.Counters error for {_actor(inter)}: {e}")
             logger.exception("get_invasions_counterseries failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
 
@@ -1116,6 +1215,7 @@ class InvasionsTimeSeriesModal(discord.ui.Modal, title="Invasions • TimeSeries
         mode = self.mode.value.strip().lower()
         disp = (self.display.value or "all").strip()
         gr   = (self.grunt.value or "all").strip()
+        logger.info(f"[audit] Stats.Invasions.TimeSeries submit by {_actor(inter)} mode={mode} display='{disp}' grunt='{gr}' area='{self._area or 'global'}' st='{st}' en='{en}'")
 
         if mode not in ("sum", "grouped", "surged"):
             return await inter.followup.send("❌ Mode must be sum/grouped/surged.", ephemeral=True)
@@ -1132,8 +1232,10 @@ class InvasionsTimeSeriesModal(discord.ui.Modal, title="Invasions • TimeSeries
                     grunt=gr,
                     confirmed="all",
                 )
+            logger.info(f"[audit] Stats.Invasions.TimeSeries success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Invasions • TimeSeries • { _fmt_area_for_title(self._area) }"
             await _send_json(inter, res, title)
         except Exception as e:
+            logger.exception(f"[audit] Stats.Invasions.TimeSeries error for {_actor(inter)}: {e}")
             logger.exception("get_invasions_timeseries failed")
             await inter.followup.send(f"❌ Query failed: `{e}`", ephemeral=True)
