@@ -14,20 +14,25 @@ import matplotlib.pyplot as plt
 # Generic helpers
 # -----------------------
 def _fmt_compact(n: float) -> str:
-    """Compact number formatting (English style: k, M, B)."""
+    """Compact number formatting (k, M, B) for ephem. messages."""
     try:
         n = float(n)
     except Exception:
         return str(n)
 
+    def fmt(val: float, suffix: str) -> str:
+        # one decimal, strip trailing .0
+        base = f"{val:.1f}".rstrip("0").rstrip(".")
+        return f"{base}{suffix}"
+
     if n >= 1_000_000_000:
-        return f"{n/1_000_000_000:.1f}B"
+        return fmt(n / 1_000_000_000, "B")
     elif n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
+        return fmt(n / 1_000_000, "M")
     elif n >= 1_000:
-        return f"{n/1_000:.1f}k"
+        return fmt(n / 1_000, "k")
     else:
-        return str(int(n)) if n.is_integer() else str(n)
+        return str(int(n)) if n.is_integer() else f"{n:.0f}"
 
 def _annotate_bars(ax, bars, values):
     for rect, v in zip(bars, values):
@@ -47,6 +52,24 @@ def _annotate_bars(ax, bars, values):
         except Exception:
             pass
 
+def _annotate_bars_h(ax, bars, values):
+    """Annotate horizontal bars at the bar tip (to the right)."""
+    for rect, v in zip(bars, values):
+        try:
+            w = rect.get_width()
+            if w <= 0:
+                continue
+            y = rect.get_y() + rect.get_height() / 2.0
+            ax.text(
+                w, y,
+                f"  {_fmt_compact(v)}",
+                va="center",
+                ha="left",
+                fontsize=8,
+            )
+        except Exception:
+            pass
+
 def _metric_color(metric: str) -> tuple[float, float, float]:
     m = (metric or "").lower()
     if m == "shiny":
@@ -62,6 +85,47 @@ def _metric_color(metric: str) -> tuple[float, float, float]:
     if m == "pvp_ultra":
         return (0.3, 0.3, 0.7)
     return (0.6, 0.6, 0.6)
+
+# cache for weather name<->id maps
+_WEATHER_REV: dict[str, str] | None = None   # "1" -> "CLEAR"
+_WEATHER_FWD: dict[str, str] | None = None   # "CLEAR" -> "1"
+
+def _load_weather_maps() -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Returns (WEATHER_REV, WEATHER_FWD):
+      REV: {"1": "CLEAR", "2": "RAINY", ...}
+      FWD: {"CLEAR": "1", "RAINY": "2", ...}
+    """
+    global _WEATHER_REV, _WEATHER_FWD
+    if _WEATHER_REV is not None and _WEATHER_FWD is not None:
+        return _WEATHER_REV, _WEATHER_FWD
+
+    # same candidate list you already use for id_to_name.json
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", "psyduckv2", "utils", "id_to_name.json"),
+        os.path.join(os.getcwd(), "stats", "psyduckv2", "utils", "id_to_name.json"),
+        os.path.join(os.getcwd(), "id_to_name.json"),
+    ]
+    weather_rev, weather_fwd = {}, {}
+    for p in candidates:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            w = data.get("WEATHER") or {}
+            # file is name -> id; build both directions
+            weather_fwd = {str(name): str(wid) for name, wid in w.items()}
+            weather_rev = {str(wid): str(name) for name, wid in w.items()}
+            break
+        except Exception:
+            continue
+
+    _WEATHER_REV, _WEATHER_FWD = weather_rev, weather_fwd
+    return weather_rev, weather_fwd
+
+def _weather_label(metric_key: str) -> str:
+    """Turn '1' into 'CLEAR' (falls back to the original key)."""
+    rev, _ = _load_weather_maps()
+    return rev.get(str(metric_key), str(metric_key))
 
 # cache for id->name mapping
 _ID_NAME_MAP: dict[str, str] | None = None
@@ -126,16 +190,6 @@ def _bucket_midpoint(bucket: str) -> Optional[float]:
     except Exception:
         return None
 
-def _red_green_ramp(t: float) -> tuple[float, float, float]:
-    """
-    t in [0, 1]: 0 = red (1,0,0), 1 = green (0,1,0)
-    """
-    if t <= 0:
-        return (1.0, 0.0, 0.0)
-    if t >= 1:
-        return (0.0, 1.0, 0.0)
-    return (1.0 - t, t, 0.0)
-
 def _tth_bucket_color(bucket: str) -> tuple[float, float, float]:
     """
     Two-section coloring:
@@ -169,66 +223,6 @@ def _bucket_sort_key(b: str) -> tuple:
     except Exception:
         return (1, 0, str(b))
 
-def _hours_sorted(bucket_to_series: dict[str, dict[str, float]]) -> list[int]:
-    def hour_num(k: str) -> int:
-        try:
-            return int(str(k).split(" ", 1)[1])
-        except Exception:
-            return 0
-    all_keys = {k for s in bucket_to_series.values() for k in s.keys()}
-    return sorted({hour_num(k) for k in all_keys})
-
-_TS_KEYS = ("ts", "timestamp", "time", "bucket", "start")
-
-def _coerce_list(data: Any) -> List[Dict[str, Any]]:
-    """Accept list[dict] or {'data': list[dict]} or fallback to []."""
-    if data is None:
-        return []
-    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-        return data["data"]
-    if isinstance(data, list):
-        return data
-    return []
-
-def _pick_time_key(row: Dict[str, Any]) -> Optional[str]:
-    for k in _TS_KEYS:
-        if k in row:
-            return k
-    return None
-
-def _parse_ts(v: Any) -> Optional[datetime]:
-    if v is None:
-        return None
-    if isinstance(v, (int, float)):
-        # Accept unix seconds or ms
-        s = float(v)
-        if s > 10_000_000_000:  # ms
-            s = s / 1000.0
-        try:
-            return datetime.utcfromtimestamp(s)
-        except Exception:
-            return None
-    if isinstance(v, str):
-        try:
-            v2 = v.replace("Z", "+00:00")
-            return datetime.fromisoformat(v2)
-        except Exception:
-            return None
-    return None
-
-def _auto_y_keys(rows: List[Dict[str, Any]], exclude: Iterable[str]) -> List[str]:
-    """Pick numeric columns to plot."""
-    if not rows:
-        return []
-    ex = set(exclude)
-    keys = set().union(*[r.keys() for r in rows]) - ex
-    numeric = []
-    for k in keys:
-        # consider numeric if first non-None value is int/float
-        val = next((r.get(k) for r in rows if r.get(k) is not None), None)
-        if isinstance(val, (int, float)):
-            numeric.append(k)
-    return sorted(numeric)
 
 def _save_current_fig_to_bytes(dpi: int = 160) -> bytes:
     buf = io.BytesIO()
@@ -258,75 +252,9 @@ async def _send_image(
 # Renderers
 # -----------------------
 
-def _line_or_area_label(y_keys: List[str]) -> str:
-    if not y_keys:
-        return "Count"
-    if len(y_keys) == 1:
-        return y_keys[0]
-    return "Count"
-
 def _format_title_suffix(area: Optional[str]) -> str:
     return "global" if not area else area
 
-def _pick_group_key(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """
-    For 'grouped' data, try to detect a categorical key like 'metric', 'pokemon_id', 'form', 'label', etc.
-    We avoid time + numeric columns.
-    """
-    if not rows:
-        return None
-    numeric_candidates = _auto_y_keys(rows, exclude=_TS_KEYS)
-    time_key = _pick_time_key(rows[0]) or ""
-    for candidate in ("metric", "pokemon_id", "form", "label", "group", "bucket", "tth_bucket"):
-        if candidate in rows[0] and candidate not in numeric_candidates and candidate != time_key:
-            return candidate
-    # Fallback: find a non-numeric, non-time string column present
-    for k in rows[0].keys():
-        if k == time_key or k in numeric_candidates:
-            continue
-        val = rows[0].get(k)
-        if isinstance(val, str):
-            return k
-    return None
-
-def _pivot_grouped(
-    rows: List[Dict[str, Any]],
-    time_key: str,
-    group_key: str
-) -> Tuple[List[datetime], Dict[str, List[float]]]:
-    """
-    Convert rows with keys [time_key, group_key, value?] into series per group.
-    We try to find the numeric value column; if multiple numeric columns exist, we choose 'count' or first numeric.
-    """
-    numeric_cols = _auto_y_keys(rows, exclude=(time_key, group_key))
-    val_key = "count" if "count" in numeric_cols else (numeric_cols[0] if numeric_cols else None)
-    # Build mapping time->group->value
-    times: List[datetime] = []
-    seen_times = {}
-    for r in rows:
-        t = _parse_ts(r.get(time_key))
-        if not t:
-            continue
-        if t not in seen_times:
-            seen_times[t] = []
-            times.append(t)
-        seen_times[t].append(r)
-    times.sort()
-    series: Dict[str, List[float]] = {}
-    groups = {str(r.get(group_key)) for r in rows if r.get(group_key) is not None}
-    for g in sorted(groups, key=_bucket_sort_key):
-        series[g] = []
-    for t in times:
-        at_t = seen_times[t]
-        index = {str(r.get(group_key)): r for r in at_t}
-        for g in series.keys():
-            v = index.get(g, {})
-            y = v.get(val_key, 0.0) if val_key else 0.0
-            try:
-                series[g].append(float(y))
-            except Exception:
-                series[g].append(0.0)
-    return times, series
 
 # ---------- Public chart functions used by handlers ----------
 
@@ -337,71 +265,485 @@ async def send_pokemon_counterseries_chart(
     area: Optional[str],
     interval: str,
     mode: str,
+    counter_type: str,           # "totals" | "tth" | "weather"
+    metric: Optional[str] = None,
     title_prefix: str = "Pokémon • Counters",
+    selected_pokemon_id: Optional[int] = None,
+    selected_form_id: Optional[int] = None,
 ) -> None:
-    """
-    Draws:
-      - sum: simple line of the first numeric key (or 'count')
-      - grouped: stacked area by detected group key
-      - surged: line chart (same as sum)
-    """
-    rows = _coerce_list(payload)
-    title = f"{title_prefix} • {interval} • {_format_title_suffix(area)}"
+    """Counters visuals aligned with TimeSeries behavior."""
 
-    if not rows:
-        return await _send_image(inter, _blank_image("No data"), title)
+    # ---------- TTH COUNTERS ----------
+    if counter_type.lower() == "tth":
+        return await send_pokemon_tth_timeseries_chart(
+            inter,
+            payload,
+            area=area,
+            mode=mode,
+            title_prefix=f"{title_prefix} • TTH",
+        )
 
-    time_key = _pick_time_key(rows[0])
-    if not time_key:
-        return await _send_image(inter, _blank_image("No time axis"), title)
+    title = f"{title_prefix} • {counter_type} • {interval} • {_format_title_suffix(area)}"
 
-    xs = []
-    for r in rows:
-        dt = _parse_ts(r.get(time_key))
-        if dt:
-            xs.append(dt)
-    if not xs:
-        return await _send_image(inter, _blank_image("No timestamps"), title)
+    def is_multi_area(d: Any) -> bool:
+        return isinstance(d, dict) and "data" not in d and any(
+            isinstance(v, dict) and "data" in v for v in d.values()
+        )
 
-    plt.figure(figsize=(9.5, 4.6))
-    if mode == "grouped":
-        group_key = _pick_group_key(rows)
-        if group_key:
-            ts, by_group = _pivot_grouped(rows, time_key, group_key)
-            # one stackplot call with all series to properly stack
-            ys_list = list(by_group.values())
-            labels = list(by_group.keys())
-            plt.stackplot(ts, *ys_list, labels=labels)
-            plt.legend(loc="upper left", fontsize=9, ncols=2)
-            plt.xlabel("Time")
+    # ---------- TOTALS ----------
+    if counter_type.lower() == "totals":
+        def norm_sum(block: dict[str, Any]) -> dict[str, float]:
+            data = block.get("data") or {}
+            out = {}
+            for k, v in data.items():
+                if isinstance(v, (int, float)):
+                    out[str(k)] = float(v)
+            return out
+
+        def norm_grouped(block: dict[str, Any]) -> dict[str, dict[str, float]]:
+            """
+            Return {metric -> { 'pid:form' -> count }}.
+            Supports:
+            A) nested: {"data": { "total": {"821:0": 10, ...}, "shiny": {...}, ... }}
+            B) flattened: {"data": { "821:0:total": 10, "821:0:shiny": 2, ... }}
+            """
+            data = block.get("data") or {}
+            out: dict[str, dict[str, float]] = {}
+
+            # Detect flattened keys quickly (has at least one "a:b:c" key)
+            flattened = any(
+                isinstance(k, str) and k.count(":") >= 2 and isinstance(v, (int, float))
+                for k, v in data.items()
+            )
+
+            if flattened:
+                # k = "pid:form:metric" (sometimes more colons, take last segment as metric)
+                for k, cnt in data.items():
+                    if not isinstance(k, str) or not isinstance(cnt, (int, float)):
+                        continue
+                    parts = k.split(":")
+                    if len(parts) < 3:
+                        continue
+                    metric_key = parts[-1]
+                    pf_key = ":".join(parts[:-1])  # re-join pid:form (and any middle parts if present)
+                    acc = out.setdefault(metric_key, {})
+                    acc[pf_key] = acc.get(pf_key, 0.0) + float(cnt)
+                return out
+
+            # nested metric -> { pid:form -> count }
+            for metric_key, inner in data.items():
+                if not isinstance(inner, dict):
+                    continue
+                m: dict[str, float] = {}
+                for pf, cnt in inner.items():
+                    try:
+                        m[str(pf)] = float(cnt)
+                    except Exception:
+                        pass
+                out[str(metric_key)] = m
+
+            return out
+
+        def norm_surged(block: dict[str, Any]) -> dict[str, dict[str, float]]:
+            data = block.get("data") or {}
+            out: dict[str, dict[str, float]] = {}
+            for metric_key, inner in data.items():
+                if not isinstance(inner, dict):
+                    continue
+                out_metric: dict[str, float] = {}
+                for hr, cnt in inner.items():
+                    try:
+                        out_metric[str(hr)] = float(cnt)
+                    except Exception:
+                        pass
+                out[str(metric_key)] = out_metric
+            return out
+
+        # --- SUM ---
+        if mode == "sum":
+            agg: dict[str, float] = {}
+            if is_multi_area(payload):
+                for block in payload.values():
+                    if not isinstance(block, dict) or block.get("mode") != "sum":
+                        continue
+                    for m, v in norm_sum(block).items():
+                        agg[m] = agg.get(m, 0.0) + v
+            elif isinstance(payload, dict) and payload.get("mode") == "sum":
+                agg = norm_sum(payload)
+            else:
+                return await _send_image(inter, _blank_image("Unsupported payload"), title)
+
+            # Selected mon/form → short message (unchanged)
+            if selected_pokemon_id is not None or selected_form_id is not None:
+                total = int(agg.get("total", 0))
+                msg = f"Found **{total}** spawns"
+                if selected_pokemon_id is not None:
+                    msg += f" for **#{selected_pokemon_id}**"
+                if selected_form_id is not None:
+                    msg += f" (form {selected_form_id})"
+                msg += "."
+                return await inter.followup.send(msg, ephemeral=True)
+
+            if not agg:
+                return await _send_image(inter, _blank_image("No data"), title)
+
+            # 1) Totals + Shiny as messages
+            total_val = int(agg.get("total", 0))
+            shiny_val = int(agg.get("shiny", 0))
+            await inter.followup.send(f"**Totals:** **{_fmt_compact(total_val)}**", ephemeral=True)
+            if shiny_val:
+                await inter.followup.send(f"**Shiny:** **{_fmt_compact(shiny_val)}**", ephemeral=True)
+
+            # 2) Bar chart for remaining metrics (exclude 'total' and 'shiny')
+            metrics = [k for k in agg.keys() if k not in ("total", "shiny")]
+            if not metrics:
+                # Nothing else to visualize
+                return await _send_image(inter, _blank_image("No non-total metrics"), f"{title} • sum")
+
+            preferred = ["iv100", "iv0", "pvp_little", "pvp_great", "pvp_ultra"]
+            metrics = [m for m in preferred if m in metrics] + [m for m in sorted(metrics) if m not in preferred]
+            vals = [agg.get(m, 0.0) for m in metrics]
+            colors = [_metric_color(m) for m in metrics]
+
+            plt.figure(figsize=(9.8, 4.2))
+            ax = plt.gca()
+            bars = plt.bar(metrics, vals, color=colors)
+            _annotate_bars(ax, bars, vals)
+            plt.xticks(rotation=25, ha="right")
             plt.ylabel("Count")
-            plt.title(title)
+            plt.title(f"{title} • sum (excluding total & shiny)")
             img = _save_current_fig_to_bytes()
-            return await _send_image(inter, img, title, filename_slug="pokemon_counters")
-        # else fall through to sum
+            return await _send_image(inter, img, f"{title} • sum", filename_slug="pokemon_counters_sum")
 
-    # sum / surged → pick numeric y-keys
-    y_keys = _auto_y_keys(rows, exclude=(time_key,))
-    y_key = "count" if "count" in y_keys else (y_keys[0] if y_keys else None)
+        # --- GROUPED ---
+        elif mode == "grouped":
+            # Build per-metric maps (pid:form -> count), aggregated if global
+            per_metric: dict[str, dict[str, float]] = {}
+            if is_multi_area(payload):
+                for block in payload.values():
+                    if not isinstance(block, dict) or block.get("mode") != "grouped":
+                        continue
+                    ng = norm_grouped(block)
+                    for metric_key, mapping in ng.items():
+                        acc = per_metric.setdefault(metric_key, {})
+                        for pf, cnt in mapping.items():
+                            acc[pf] = acc.get(pf, 0.0) + cnt
+            elif isinstance(payload, dict) and payload.get("mode") == "grouped":
+                per_metric = norm_grouped(payload)
+            else:
+                return await _send_image(inter, _blank_image("Unsupported payload"), title)
 
-    ys, xs = [], []
-    for r in rows:
-        t = _parse_ts(r.get(time_key))
-        if not t:
-            continue
-        v = r.get(y_key, 0.0) if y_key else 0.0
-        try:
-            ys.append(float(v))
-            xs.append(t)
-        except Exception:
-            pass
+            if not per_metric:
+                return await _send_image(inter, _blank_image("No data"), title)
 
-    plt.plot(xs, ys)
-    plt.xlabel("Time")
-    plt.ylabel(_line_or_area_label([y_key] if y_key else []))
-    plt.title(title)
-    img = _save_current_fig_to_bytes()
-    await _send_image(inter, img, title, filename_slug="pokemon_counters")
+            # Selected mon/form → short message (sum counts inside 'total')
+            if selected_pokemon_id is not None or selected_form_id is not None:
+                merged_total = per_metric.get("total", {})
+                def _match(pf: str) -> bool:
+                    try:
+                        pid_s, form_s = pf.split(":", 1)
+                    except ValueError:
+                        return False
+                    ok = True
+                    if selected_pokemon_id is not None:
+                        ok = ok and (pid_s == str(selected_pokemon_id))
+                    if selected_form_id is not None:
+                        ok = ok and (form_s == str(selected_form_id))
+                    return ok
+                count = int(sum(v for k, v in merged_total.items() if _match(k)))
+                msg = f"Found **{count}** spawns"
+                if selected_pokemon_id is not None:
+                    msg += f" for **#{selected_pokemon_id}**"
+                if selected_form_id is not None:
+                    msg += f" (form {selected_form_id})"
+                msg += "."
+                return await inter.followup.send(msg, ephemeral=True)
+
+            # 1) Totals + Shiny messages (sum over their maps if present)
+            total_sum = int(sum(per_metric.get("total", {}).values()))
+            await inter.followup.send(f"**Totals:** **{_fmt_compact(total_sum)}**", ephemeral=True)
+            shiny_sum = int(sum(per_metric.get("shiny", {}).values()))
+            if shiny_sum:
+                await inter.followup.send(f"**Shiny:** **{_fmt_compact(shiny_sum)}**", ephemeral=True)
+
+            # 2) For each metric except total & shiny, plot Top-15 pid:form
+            metrics_to_plot = [m for m in per_metric.keys() if m not in ("total", "shiny")]
+            preferred = ["iv100", "iv0", "pvp_little", "pvp_great", "pvp_ultra"]
+            metrics_to_plot = [m for m in preferred if m in metrics_to_plot] + \
+                            [m for m in sorted(metrics_to_plot) if m not in preferred]
+
+            if not metrics_to_plot:
+                return  # nothing non-total/non-shiny to chart
+
+            N = 15
+            for metric_name in metrics_to_plot:
+                mapping = per_metric.get(metric_name, {})
+                if not mapping:
+                    continue
+                top = sorted(mapping.items(), key=lambda kv: kv[1], reverse=True)[:N]
+                labels = [_pidform_label(k) for k, _ in top]
+                values = [v for _, v in top]
+
+                plt.figure(figsize=(10.5, 6.2))
+                ax = plt.gca()
+                y_pos = list(range(len(labels)))
+                bars = plt.barh(y_pos, values, color=_metric_color(metric_name))
+                plt.yticks(y_pos, labels)
+                plt.gca().invert_yaxis()
+                _annotate_bars_h(ax, bars, values)
+                plt.xlabel("Count")
+                plt.title(f"{title} • grouped • {metric_name} (top {len(labels)})")
+                img = _save_current_fig_to_bytes()
+                await _send_image(
+                    inter, img,
+                    f"{title} • grouped • {metric_name}",
+                    filename_slug=f"pokemon_counters_grouped_{metric_name}"
+                )
+
+            return
+
+        # --- SURGED ---
+        elif mode == "surged":
+            merged: dict[str, dict[str, float]] = {}
+            if is_multi_area(payload):
+                for block in payload.values():
+                    if not isinstance(block, dict) or block.get("mode") != "surged":
+                        continue
+                    ns = norm_surged(block)
+                    for metric_key, inner in ns.items():
+                        acc = merged.setdefault(metric_key, {})
+                        for hr, v in inner.items():
+                            acc[hr] = acc.get(hr, 0.0) + v
+            elif isinstance(payload, dict) and payload.get("mode") == "surged":
+                merged = norm_surged(payload)
+            else:
+                return await _send_image(inter, _blank_image("Unsupported payload"), title)
+
+            if not merged:
+                return await _send_image(inter, _blank_image("No data"), title)
+
+            # Totals + hourly lists
+            totals_series = merged.get("total", {})
+            total_count = int(sum(totals_series.values()))
+            await inter.followup.send(f"**Totals (surged):** **{_fmt_compact(total_count)}**", ephemeral=True)
+
+            def hour_num(k: str) -> int:
+                try: return int(str(k).split(" ", 1)[1])
+                except Exception: return 0
+
+            all_hours_keys = set().union(*[d.keys() for d in merged.values() if isinstance(d, dict)]) or totals_series.keys()
+            x_keys = sorted(all_hours_keys, key=hour_num)
+
+            if x_keys:
+                lines = ["**Totals by hour:**"]
+                for k in x_keys:
+                    lines.append(f"• Hour {hour_num(k)} — {_fmt_compact(totals_series.get(k, 0))}")
+                await inter.followup.send("\n".join(lines), ephemeral=True)
+
+                shiny_series = merged.get("shiny", {})
+                if shiny_series:
+                    lines = ["**Shiny by hour:**"]
+                    for k in x_keys:
+                        lines.append(f"• Hour {hour_num(k)} — {_fmt_compact(shiny_series.get(k, 0))}")
+                    await inter.followup.send("\n".join(lines), ephemeral=True)
+
+            # Chart for non-total & non-shiny metrics
+            metrics_all = [m for m in merged.keys() if m not in ("total", "shiny")]
+            if not metrics_all:
+                return await _send_image(inter, _blank_image("No non-total metrics"), title)
+
+            hours = [hour_num(k) for k in x_keys]
+            idx = list(range(len(hours)))
+            preferred = ["iv100", "iv0", "pvp_little", "pvp_great", "pvp_ultra"]
+            metrics = [m for m in preferred if m in metrics_all] + [m for m in metrics_all if m not in preferred]
+            metrics = metrics[:10]
+
+            plt.figure(figsize=(10.8, 5.6))
+            ax = plt.gca()
+            n_series = max(1, len(metrics))
+            width = 0.8 / n_series
+            for i, metric_name in enumerate(metrics):
+                series = merged[metric_name]
+                y_vals = [float(series.get(k, 0.0)) for k in x_keys]
+                offsets = [x - 0.4 + i * width + width / 2 for x in idx]
+                bars = plt.bar(offsets, y_vals, width=width, label=metric_name, color=_metric_color(metric_name))
+                _annotate_bars(ax, bars, y_vals)
+
+            plt.xticks(idx, [str(h) for h in hours])
+            plt.xlabel("Hour")
+            plt.ylabel("Count")
+            plt.title(f"{title} • surged (excluding total & shiny)")
+            if len(metrics) <= 10:
+                plt.legend(fontsize=8, ncols=3, loc="upper left")
+            img = _save_current_fig_to_bytes()
+            return await _send_image(inter, img, f"{title} • surged", filename_slug="pokemon_counters_surged")
+
+        else:
+            return await _send_image(inter, _blank_image(f"Unsupported mode '{mode}'"), title)
+
+    # ---------- WEATHER (monthly) ----------
+    if counter_type.lower() == "weather":
+        # SUM: {metric -> {threshold -> count}}
+        # GROUPED: {(YYYYMM, metric) -> {threshold -> count}}
+        def norm_sum(block: dict[str, Any]) -> dict[str, dict[str, float]]:
+            data = block.get("data") or {}
+            out: dict[str, dict[str, float]] = {}
+            for metric_key, inner in data.items():
+                if not isinstance(inner, dict):
+                    continue
+                th_map: dict[str, float] = {}
+                for th, cnt in inner.items():
+                    try:
+                        th_map[str(th)] = float(cnt)
+                    except Exception:
+                        pass
+                out[str(metric_key)] = th_map
+            return out
+
+        def norm_grouped(block: dict[str, Any]) -> dict[tuple[str, str], dict[str, float]]:
+            data = block.get("data") or {}
+            out: dict[tuple[str, str], dict[str, float]] = {}
+            for ym_metric, inner in data.items():
+                if not isinstance(inner, dict):
+                    continue
+                try:
+                    ym, metric_key = str(ym_metric).split(":", 1)
+                except ValueError:
+                    continue
+                th_map: dict[str, float] = {}
+                for th, cnt in inner.items():
+                    try:
+                        th_map[str(th)] = float(cnt)
+                    except Exception:
+                        pass
+                out[(ym, str(metric_key))] = th_map
+            return out
+
+        # --- SUM ---
+        if mode == "sum":
+            agg: dict[str, dict[str, float]] = {}
+            if is_multi_area(payload):
+                for block in payload.values():
+                    if not isinstance(block, dict) or block.get("mode") != "sum":
+                        continue
+                    ns = norm_sum(block)
+                    for m, th_map in ns.items():
+                        acc = agg.setdefault(m, {})
+                        for th, v in th_map.items():
+                            acc[th] = acc.get(th, 0.0) + v
+            elif isinstance(payload, dict) and payload.get("mode") == "sum":
+                agg = norm_sum(payload)
+            else:
+                return await _send_image(inter, _blank_image("Unsupported payload"), title)
+
+            if not agg:
+                return await _send_image(inter, _blank_image("No data"), title)
+
+            # decide which metrics to show
+            metrics = sorted(agg.keys(), key=lambda s: int(s) if str(s).isdigit() else 999)
+
+            # if the handler passed a metric filter, keep numeric behavior;
+            # (your handlers already pass numbers like "1")
+            if metric is not None:
+                metric_id = str(metric)
+                # also allow name filters like "CLEAR" if you ever pass them:
+                _, wfwd = _load_weather_maps()
+                metric_id = wfwd.get(str(metric), metric_id)
+                if metric_id in agg:
+                    metrics = [metric_id]
+                else:
+                    metrics = []
+
+            # message totals with friendly names
+            lines = ["**Weather totals:**"]
+            for m in metrics:
+                lines.append(f"• {_weather_label(m)}: **{_fmt_compact(int(sum(agg[m].values())))}**")
+            await inter.followup.send("\n".join(lines), ephemeral=True)
+
+            # stacked bars (thresholds stack within each metric) with friendly x labels
+            plt.figure(figsize=(10.5, 5.6))
+            ax = plt.gca()
+            all_th = set().union(*[agg[m].keys() for m in metrics]) if metrics else set()
+            th_sorted = sorted(all_th, key=lambda s: int(s) if str(s).isdigit() else 999)
+            bottoms = [0.0] * len(metrics)
+
+            x_labels = [_weather_label(m) for m in metrics]
+            for th in th_sorted:
+                vals = [agg[m].get(th, 0.0) for m in metrics]
+                bars = plt.bar(x_labels, vals, bottom=bottoms, label=th)
+                _annotate_bars(ax, bars, [b + v for b, v in zip(bottoms, vals)])
+                bottoms = [b + v for b, v in zip(bottoms, vals)]
+
+            plt.legend(title="Threshold", fontsize=8, ncols=3, loc="upper left")
+            plt.ylabel("Count")
+            plt.title(f"{title} • sum (stacked by threshold)")
+            img = _save_current_fig_to_bytes()
+            return await _send_image(inter, img, f"{title} • weather_sum", filename_slug="pokemon_counters_weather_sum")
+
+
+        # --- GROUPED ---
+        elif mode == "grouped":
+            agg: dict[tuple[str, str], dict[str, float]] = {}
+            if is_multi_area(payload):
+                for block in payload.values():
+                    if not isinstance(block, dict) or block.get("mode") != "grouped":
+                        continue
+                    ng = norm_grouped(block)
+                    for key, th_map in ng.items():
+                        acc = agg.setdefault(key, {})
+                        for th, v in th_map.items():
+                            acc[th] = acc.get(th, 0.0) + v
+            elif isinstance(payload, dict) and payload.get("mode") == "grouped":
+                agg = norm_grouped(payload)
+            else:
+                return await _send_image(inter, _blank_image("Unsupported payload"), title)
+
+            if not agg:
+                return await _send_image(inter, _blank_image("No data"), title)
+
+            month_keys = sorted({ym for (ym, _m) in agg.keys()})
+
+            metric_filter = None
+            if metric is not None:
+                # allow numeric or name input
+                _, wfwd = _load_weather_maps()
+                metric_filter = wfwd.get(str(metric), str(metric))
+
+            metrics = sorted(
+                {m for (_ym, m) in agg.keys() if (metric_filter is None or m == metric_filter)},
+                key=lambda s: int(s) if s.isdigit() else 999
+            )
+
+            for m in metrics:
+                plt.figure(figsize=(10.5, 5.6))
+                ax = plt.gca()
+                th_all = set().union(*[agg.get((ym, m), {}).keys() for ym in month_keys]) if month_keys else set()
+                th_sorted = sorted(th_all, key=lambda s: int(s) if s.isdigit() else 999)
+                bottoms = [0.0] * len(month_keys)
+
+                for th in th_sorted:
+                    vals = [agg.get((ym, m), {}).get(th, 0.0) for ym in month_keys]
+                    bars = plt.bar(month_keys, vals, bottom=bottoms, label=th)
+                    _annotate_bars(ax, bars, [b + v for b, v in zip(bottoms, vals)])
+                    bottoms = [b + v for b, v in zip(bottoms, vals)]
+
+                plt.legend(title="Threshold", fontsize=8, ncols=3, loc="upper left")
+                plt.ylabel("Count")
+                plt.title(f"{title_prefix} • weather • grouped • {_weather_label(m)} • {_format_title_suffix(area)}")
+                img = _save_current_fig_to_bytes()
+                await _send_image(
+                    inter, img,
+                    f"{title_prefix} • weather • grouped • {_weather_label(m)} • {_format_title_suffix(area)}",
+                    filename_slug=f"pokemon_counters_weather_grouped_m{m}"
+                )
+
+            return  # multiple images posted
+
+        else:
+            return await _send_image(inter, _blank_image(f"Unsupported mode '{mode}' for weather"), title)
+
+    # ---------- FALLBACK ----------
+    return await _send_image(inter, _blank_image("Unsupported counter type"), title)
 
 async def send_pokemon_timeseries_chart(
     inter: discord.Interaction,
@@ -665,11 +1007,58 @@ async def send_pokemon_tth_timeseries_chart(
         )
 
     def _normalize_single_area(d: Dict[str, Any]) -> Tuple[str, Dict[str, Dict[str, float]]]:
+        """
+        Returns (mode, bucket_to_series) where:
+        bucket_to_series = { "<bucket>": { "<time-key>": float } }
+
+        Supports:
+        - SUM/GROUPED with bucket->series mapping already
+        - SURGED with EITHER:
+            (i) bucket -> {"hour 15": v, ...}
+            (ii) hour   -> { bucket: v, ... }   <-- invert to bucket->hour
+        """
         m = str(d.get("mode", mode or "sum")).lower()
         data = d.get("data") or {}
         if not isinstance(data, dict):
             data = {}
+
+        # Helper: hour label detection (accept "hour 15" OR "15")
+        def _is_hour_label(s: str) -> bool:
+            s = str(s).lower().strip()
+            return (s.startswith("hour ") and s[5:].strip().isdigit()) or s.isdigit()
+
+        # Check if we have HOUR-FIRST (keys look like hours, values are {bucket:count})
+        hour_first = (
+            m == "surged"
+            and all(_is_hour_label(k) and isinstance(v, dict) for k, v in data.items())
+            and any(isinstance(v, dict) for v in data.values())
+        )
+
         norm: Dict[str, Dict[str, float]] = {}
+
+        if hour_first:
+            # invert: hour -> {bucket: v}  ==>  bucket -> { "hour X": v }
+            for hr, bucket_map in data.items():
+                if not isinstance(bucket_map, dict):
+                    continue
+                # normalize hour key to "hour N" (string) for consistency
+                hr_s = str(hr).strip()
+                if hr_s.isdigit():
+                    hour_key = f"hour {int(hr_s)}"
+                elif hr_s.lower().startswith("hour "):
+                    hour_key = f"hour {hr_s.split(' ', 1)[1].strip()}"
+                else:
+                    hour_key = hr_s  # fallback
+
+                for bucket, v in bucket_map.items():
+                    try:
+                        acc = norm.setdefault(str(bucket), {})
+                        acc[hour_key] = acc.get(hour_key, 0.0) + float(v)
+                    except Exception:
+                        pass
+            return m, norm
+
+        # Otherwise behave as before: bucket -> series (totals/unix/hour labels)
         for bucket, series in data.items():
             if not isinstance(series, dict):
                 # sum-mode might be flat {"15_20": 3361, ...}
@@ -683,6 +1072,7 @@ async def send_pokemon_tth_timeseries_chart(
                 except Exception:
                     pass
             norm[str(bucket)] = inner
+
         return m, norm
 
     # Fold into (final_mode, {bucket: {time_key: value}})
@@ -743,8 +1133,11 @@ async def send_pokemon_tth_timeseries_chart(
     if is_hourly:
         # Ordered hour axis
         def hour_num(k: str) -> int:
+            s = str(k).lower().strip()
+            if s.startswith("hour "):
+                s = s[5:].strip()
             try:
-                return int(str(k).split(" ", 1)[1])
+                return int(s)
             except Exception:
                 return 0
 

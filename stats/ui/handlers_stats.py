@@ -351,6 +351,7 @@ class CountersTotalsStep2Modal(discord.ui.Modal, title="Counters • Totals • 
                 area=self._area,
                 interval=iv,
                 mode=md,
+                counter_type="totals",
                 title_prefix="Pokémon • Counters • totals"
             )
         except Exception as e:
@@ -415,6 +416,7 @@ class CountersTTHStep2Modal(discord.ui.Modal, title="Counters • TTH • Step 2
                 area=self._area,
                 interval=iv,
                 mode=md,
+                counter_type="tth",
                 title_prefix="Pokémon • Counters • tth"
             )
         except Exception as e:
@@ -474,6 +476,7 @@ class CountersWeatherStep2Modal(discord.ui.Modal, title="Counters • Weather �
                 area=self._area,
                 interval=iv,
                 mode=md,
+                counter_type="weather",
                 title_prefix="Pokémon • Counters • weather"
             )
         except Exception as e:
