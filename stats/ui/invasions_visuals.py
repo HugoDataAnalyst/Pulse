@@ -8,8 +8,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import discord
-
-# Shared helpers
+from datetime import datetime, timezone
 from stats.psyduckv2.utils.visual_helpers import (
     _fmt_compact,
     _annotate_bars,
@@ -21,8 +20,8 @@ from stats.psyduckv2.utils.visual_helpers import (
 
 # ---------- local (invasion-specific) helpers ----------
 
-_INV_DISPLAY_REV: dict[str, str] | None = None      # "1" -> "GRUNT", ...
-_INV_CHARACTER_REV: dict[str, str] | None = None    # "10" -> "DARK_GRUNT_FEMALE", ...
+_INV_DISPLAY_REV: dict[str, str] | None = None
+_INV_CHARACTER_REV: dict[str, str] | None = None
 
 def _load_invasion_maps() -> tuple[dict[str, str], dict[str, str]]:
     """
@@ -89,6 +88,28 @@ def _blank_image(text: str = "No data") -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
+def _epochs_to_datetimes(xs: list[int]) -> list[datetime]:
+    out: list[datetime] = []
+    for e in xs:
+        try:
+            out.append(datetime.fromtimestamp(int(e), tz=timezone.utc))
+        except Exception:
+            continue
+    return out
+
+def _rolling_avg(vals: list[float], win: int = 3) -> list[float]:
+    """Simple centered rolling average; fall back to original at edges."""
+    if win <= 1 or len(vals) < win:
+        return vals
+    half = win // 2
+    out = []
+    for i in range(len(vals)):
+        lo = max(0, i - half)
+        hi = min(len(vals), i + half + 1)
+        seg = vals[lo:hi]
+        out.append(sum(seg) / max(1, len(seg)))
+    return out
+
 # ---------- normalizers ----------
 
 def _norm_sum(block: dict[str, Any]) -> dict[str, Any]:
@@ -154,7 +175,7 @@ async def send_invasion_counterseries_chart(
     *,
     area: Optional[str],
     interval: str,
-    mode: str,                      # 'sum' | 'grouped' | 'surged' (hourly only)
+    mode: str,
     title_prefix: str = "Invasions • Counters",
 ) -> None:
     """
@@ -229,7 +250,7 @@ async def send_invasion_counterseries_chart(
         if not merged:
             return await _send_image(inter, _blank_image("No data"), title)
 
-        # 1) display_type+character → Top-15 (horizontal)
+        # 1) display_type+character
         dpc = merged.get("display_type+character", {})
         if dpc:
             top = sorted(dpc.items(), key=lambda kv: kv[1], reverse=True)[:15]
@@ -252,7 +273,7 @@ async def send_invasion_counterseries_chart(
                 filename_slug="invasions_grouped_display_character"
             )
 
-        # 2) grunt → Top-15 (horizontal)
+        # 2) grunt
         gr = merged.get("grunt", {})
         if gr:
             top = sorted(gr.items(), key=lambda kv: kv[1], reverse=True)[:15]
@@ -275,7 +296,7 @@ async def send_invasion_counterseries_chart(
                 filename_slug="invasions_grouped_grunt"
             )
 
-        # 3) confirmed → Yes/No
+        # 3) confirmed
         conf = merged.get("confirmed", {})
         if conf:
             keys = sorted(conf.keys(), key=lambda s: (s not in ("0","1"), s))
@@ -381,7 +402,7 @@ async def send_invasion_counterseries_chart(
                 filename_slug="invasions_surged_display_character"
             )
 
-        # 2) Top-N grunt by hour (grouped bars) — optional second chart
+        # 2) Top-N grunt by hour (grouped bars)
         gr_total: dict[str, float] = {}
         for h in x_hours:
             for k, v in (hours_map.get(h, {}).get("grunt", {}) or {}).items():
@@ -412,7 +433,7 @@ async def send_invasion_counterseries_chart(
                 filename_slug="invasions_surged_grunt"
             )
 
-        # 3) confirmed by hour (Yes/No) — compact if present
+        # 3) confirmed by hour (Yes/No)
         conf_levels = sorted({k for h in x_hours for k in (hours_map.get(h, {}).get("confirmed", {}) or {}).keys()},
                              key=lambda s: (s not in ("0","1"), s))
         if conf_levels:
@@ -529,7 +550,7 @@ async def send_invasion_timeseries_chart(
     payload: Any,
     *,
     area: Optional[str],
-    mode: str,                      # 'sum' | 'grouped' | 'surged' (hourly only)
+    mode: str,
     title_prefix: str = "Invasions • Timeseries",
 ) -> None:
     """
@@ -602,37 +623,65 @@ async def send_invasion_timeseries_chart(
         if not merged:
             return await _send_image(inter, _blank_image("No data"), title)
 
-        # Pick top-N series by total count
+        # Totals per category and unified X axis
         totals = {k: sum(tsmap.values()) for k, tsmap in merged.items()}
-        top_keys = [k for k, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:8]]
+        # bar chart (top-15) for label readability
+        top15 = [k for k, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:15]]
 
-        # Build unified time axis (sorted)
+        # --- Top-15 totals (horizontal) ---
+        if top15:
+            labels = [_tskey_label(k) for k in top15]
+            values = [totals[k] for k in top15]
+            plt.figure(figsize=(11.2, 6.6))
+            ax = plt.gca()
+            y = list(range(len(labels)))
+            bars = plt.barh(y, values)
+            plt.yticks(y, labels)
+            plt.gca().invert_yaxis()
+            _annotate_bars_h(ax, bars, values)
+            plt.xlabel("Total")
+            plt.title(f"{title} • grouped • top {len(labels)} totals")
+            img = _save_current_fig_to_bytes()
+            await _send_image(
+                inter, img,
+                f"{title} • grouped • totals",
+                filename_slug="invasions_ts_grouped_totals"
+            )
+
+        # --- Line chart for top-N categories over time ---
+        top_keys = top15[:8]  # show fewer lines to keep it clean
         all_ts = sorted({t for mp in merged.values() for t in mp.keys()})
         if not all_ts:
             return await _send_image(inter, _blank_image("No timestamps"), title)
 
-        # Convert to datetime for nicer x-axis
-        x_dt = [datetime.utcfromtimestamp(t) for t in all_ts]
+        x_dt = _epochs_to_datetimes(all_ts)
 
-        plt.figure(figsize=(12.0, 5.6))
+        # If there are many points, apply a light smoothing to reduce jaggedness
+        apply_smoothing = len(all_ts) >= 60
+
+        plt.figure(figsize=(12.2, 5.8))
         ax = plt.gca()
         for k in top_keys:
             series = merged.get(k, {})
             y = [series.get(t, 0.0) for t in all_ts]
-            plt.plot(x_dt, y, marker="o", linewidth=1.8, markersize=3.5, label=_tskey_label(k))
+            if apply_smoothing:
+                y = _rolling_avg(y, win=3)
+            plt.plot(x_dt, y, "-", linewidth=1.8, marker=None, label=_tskey_label(k))
 
+        ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter('%H:%M'))
+        ax.xaxis.set_major_locator(matplotlib.dates.AutoDateLocator())
+        plt.grid(True, alpha=0.25)
         plt.xlabel("Time (UTC)")
         plt.ylabel("Count")
         plt.title(f"{title} • grouped (top {len(top_keys)})")
         if len(top_keys) <= 10:
             plt.legend(fontsize=8, ncols=2, loc="upper left")
-        plt.xticks(rotation=25, ha="right")
         plt.tight_layout()
         img = _save_current_fig_to_bytes()
         return await _send_image(
             inter, img,
             f"{title} • grouped",
-            filename_slug="invasions_ts_grouped"
+            filename_slug="invasions_ts_grouped_lines"
         )
 
     # ---------------- SURGED (hourly only) ----------------

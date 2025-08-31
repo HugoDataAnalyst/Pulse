@@ -36,6 +36,10 @@ from stats.ui.invasions_visuals import (
     send_invasion_counterseries_chart,
     send_invasion_timeseries_chart,
 )
+from stats.ui.quests_visuals import (
+    send_quest_counterseries_chart,
+    send_quest_timeseries_chart,
+)
 # -----------------------
 # Helpers
 # -----------------------
@@ -873,7 +877,15 @@ class QuestsCountersStep2Modal(discord.ui.Modal, title="Quests • Counters • 
                 )
             logger.info(f"[audit] Stats.Quests.Counters success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Quests • Counters • {iv} • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_quest_counterseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval=iv,
+                mode=mode,
+                title_prefix=title
+            )
         except Exception as e:
             logger.exception(f"[audit] Stats.Quests.Counters error for {_actor(inter)}: {e}")
             logger.exception("get_quests_counterseries failed")
@@ -909,6 +921,8 @@ class QuestsTimeSeriesModal(discord.ui.Modal, title="Quests • TimeSeries"):
         if qmode not in ("ALL", "AR", "NORMAL"):
             return await inter.followup.send("❌ quest_mode must be all / AR / NORMAL.", ephemeral=True)
 
+        interval_label = f"{st} → {en}"
+
         try:
             async with get_psyduck_client() as api:
                 res = await get_quest_timeseries(
@@ -922,7 +936,17 @@ class QuestsTimeSeriesModal(discord.ui.Modal, title="Quests • TimeSeries"):
                 )
             logger.info(f"[audit] Stats.Quests.TimeSeries success for {_actor(inter)} points={len(res) if hasattr(res, '__len__') else 'n/a'}")
             title = f"Quests • TimeSeries • { _fmt_area_for_title(self._area) }"
-            await _send_json(inter, res, title)
+            #await _send_json(inter, res, title)
+            await send_quest_timeseries_chart(
+                inter,
+                res,
+                area=self._area,
+                interval_label=interval_label,
+                mode=mode,
+                query_quest_mode=qmode,
+                query_quest_type=qtype,
+                title_prefix=title
+            )
         except Exception as e:
             logger.exception(f"[audit] Stats.Quests.TimeSeries error for {_actor(inter)}: {e}")
             logger.exception("get_quests_timeseries failed")
