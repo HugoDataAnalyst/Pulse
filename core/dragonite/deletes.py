@@ -9,6 +9,7 @@ async def delete_proxy(client: APIClient, proxy_id: int) -> Dict[str, Any]:
     res = await client.delete(f"/proxies/{proxy_id}")
 
     # Debug log
-    logger.debug(f"[delete_proxy] Proxy ID: {proxy_id} | Response: {res}")
+    #logger.debug(f"[delete_proxy] Proxy ID: {proxy_id} | Response: {res}")
+    logger.debug(f"[delete_proxy] Proxy ID: {proxy_id}")
 
     return res
